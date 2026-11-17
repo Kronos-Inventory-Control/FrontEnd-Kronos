@@ -1,4 +1,4 @@
-import { supabase } from "./supabase";
+import { solicitar } from "./http";
 
 /**
  * CAPA DE DATOS · Kronos (esquema V3, ver KRONOS_ESQUEMA_V3.sql)
@@ -401,44 +401,47 @@ export const CONJUNTOS = {
 /* ------------------------------------------------------------------ */
 
 /** Devuelve el perfil con la forma que usa el front, o null si la cuenta aún no tiene fila en `usuarios`. */
-export async function cargarPerfil(authUser) {
-  if (!authUser) return null;
+/* ------------------------------------------------------------------ */
+/* PERFIL / SESIÓN - FASTAPI                                           */
+/* ------------------------------------------------------------------ */
 
-  const { data: u, error } = await supabase
-    .from(TABLAS.usuarios)
-    .select("*")
-    .eq("auth_id", authUser.id)
-    .maybeSingle();
-  lanzar(error);
-  if (!u) return null;
+import { solicitar } from "./http";
 
-  const [rol, dir, cli, prov] = await Promise.all([
-    supabase.from(TABLAS.roles).select("*").eq("idRol", u.rol_idRol).maybeSingle(),
-    u.direccion_idDireccion
-      ? supabase.from(TABLAS.direcciones).select("*").eq("idDireccion", u.direccion_idDireccion).maybeSingle()
-      : Promise.resolve({ data: null }),
-    supabase.from(TABLAS.clientes).select("*").eq("usuario_identificacion", u.identificacion).maybeSingle(),
-    supabase.from(TABLAS.proveedores).select("*").eq("usuario_identificacion", u.identificacion).maybeSingle(),
-  ]);
+/** Devuelve el perfil del usuario autenticado desde FastAPI. */
+export async function cargarPerfil() {
+  const usuario = await solicitar("/auth/me");
 
-  const nombreRol = String(rol.data?.nombreRol || "").toLowerCase();
-  return {
-    id: authUser.id,
-    identificacion: u.identificacion,
-    nombre: u.nombre,
-    apellido: u.apellidos,
-    telefono: u.telefono || "",
-    correo: u.correoElectronico,
-    direccion: dir.data?.direccionCompleta || "",
-    localidad: dir.data?.localidad || "",
-    barrio: dir.data?.barrio || "",
-    ciudad: dir.data?.ciudad || "",
-    direccion_id: u.direccion_idDireccion,
-    rol: nombreRol,
-    cliente_id: cli.data?.idCliente ?? null,
-    carrito_activo: Boolean(cli.data?.carritoActivo),
-    proveedor_id: prov.data?.idProveedor ?? null,
+  const nombresRoles = {
+    1: "cliente",
+    2: "proveedor",
+    3: "jefe",
+    4: "empleado",
+    5: "administrador",
   };
+
+  return {
+    id: usuario.identificacion,
+    identificacion: usuario.identificacion,
+    nombre: usuario.nombre,
+    apellido: usuario.apellidos,
+    telefono: usuario.telefono || "",
+    correo: usuario.correoElectronico,
+    rol: nombresRoles[Number(usuario.rol)] || null,
+    direccion: "",
+    localidad: "",
+    barrio: "",
+    ciudad: "",
+    direccion_id: null,
+    cliente_id: null,
+    carrito_activo: false,
+    proveedor_id: null,
+  };
+}
+
+/** Obtiene el rol del usuario autenticado. */
+export async function cargarRol() {
+  const perfil = await cargarPerfil();
+  return perfil?.rol || null;
 }
 
 /** Rol (en minúsculas) del usuario autenticado, o null. */

@@ -32,7 +32,7 @@ export const ROLES = {
   ADMINISTRADOR: "administrador",
   EMPLEADO: "empleado",
   CLIENTE: "cliente",
-  PROVEEDOR: "proveedor",
+  PROVEEDOR: "proveedor", 
 };
 
 /** Roles que entran al panel del jefe. */

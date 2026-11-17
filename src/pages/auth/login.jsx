@@ -109,7 +109,7 @@ export default function Login({ abierto = true, alCerrar }) {
     // JEFE / ADMINISTRADOR
     // ------------------------------------------------------
 
-    if (rol === "jefe" || rol === "administrador" || rol === "empleado") {
+    if (rol === "jefe" || rol === "SUPER_ADMIN" || rol === "empleado") {
 
       navigate("/jefe/panel", {
         replace: true,
