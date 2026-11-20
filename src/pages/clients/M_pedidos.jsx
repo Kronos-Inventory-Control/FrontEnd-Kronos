@@ -1,17 +1,15 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import "../../assets/css/M_index.css";
 import "../../assets/css/M_pedidos.css";
 import logoImg from "../../assets/img/logo.png";
 import { useAuth } from "../../context/AuthContext";
 import useCerrarSesion from "../../hooks/useCerrarSesion";
-import { useRealtimeTable } from "../../hooks/useRealtimeTable";
+import { supabase } from "../../api/supabase";
 
 /**
- * Portal del cliente · Mis Pedidos — conectado en tiempo real a `ventas` +
- * `detalleVentas` (cada producto comprado es una fila). Por RLS el cliente
- * solo recibe sus propias compras; el estado y la nota del vendedor los
- * actualiza el jefe desde el historial de compras.
+ * Portal del cliente · Mis Pedidos — conectado en tiempo real a `ordenes_compra`.
+ * Carga los pedidos del cliente, escucha cambios y recarga al volver a la pestaña.
  */
 
 const ETIQUETA_ESTADO = {
@@ -127,10 +125,51 @@ export default function M_pedidos() {
   const navigate = useNavigate();
   const { perfil, usuario } = useAuth();
 
-  const { datos: pedidos, cargando, error } = useRealtimeTable("pedidos_cliente", {
-    orderBy: "fecha",
-    ascending: false,
-  });
+  const [pedidos, setPedidos] = useState([]);
+  const [cargando, setCargando] = useState(true);
+  const [error, setError] = useState("");
+
+  const cargarPedidos = useCallback(async () => {
+    if (!usuario?.id) return;
+    const { data, error: errorSelect } = await supabase
+      .from("ordenes_compra")
+      .select("*")
+      .eq("cliente_id", usuario.id)
+      .order("fecha", { ascending: false, nullsFirst: true });
+
+    if (errorSelect) setError(errorSelect.message);
+    else {
+      setError("");
+      setPedidos(data ?? []);
+    }
+    setCargando(false);
+  }, [usuario?.id]);
+
+  useEffect(() => {
+    if (!usuario?.id) return;
+    cargarPedidos();
+
+    // Tiempo real: cualquier cambio en los pedidos de este cliente recarga la lista
+    const canal = supabase
+      .channel(`pedidos-${usuario.id}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "ordenes_compra", filter: `cliente_id=eq.${usuario.id}` },
+        () => cargarPedidos()
+      )
+      .subscribe();
+
+    // Respaldo: recargar al volver a la pestaña
+    const alVolver = () => {
+      if (document.visibilityState === "visible") cargarPedidos();
+    };
+    document.addEventListener("visibilitychange", alVolver);
+
+    return () => {
+      supabase.removeChannel(canal);
+      document.removeEventListener("visibilitychange", alVolver);
+    };
+  }, [usuario?.id, cargarPedidos]);
 
   const nombreEnvio = perfil?.nombre ? `${perfil.nombre} ${perfil.apellido || ""}`.trim() : usuario?.email;
 
@@ -151,7 +190,7 @@ export default function M_pedidos() {
               </span>
             </div>
 
-            {error && <div className="alert alert-danger">No se pudo conectar con las tablas de ventas: {error}</div>}
+            {error && <div className="alert alert-danger">No se pudo conectar con "ordenes_compra": {error}</div>}
 
             {cargando ? (
               <p className="text-center text-light-50 py-5">Cargando tus pedidos…</p>
@@ -165,7 +204,7 @@ export default function M_pedidos() {
               </div>
             ) : (
               pedidos.map((pedido) => (
-                <article key={pedido.uid} className="p-3 rounded mb-4" style={{ background: "#151921", border: "1px solid #2b3340" }}>
+                <article key={pedido.id} className="p-3 rounded mb-4" style={{ background: "#151921", border: "1px solid #2b3340" }}>
                   <div className="pb-2 mb-3 border-bottom border-secondary d-flex justify-content-between flex-wrap gap-2">
                     <span className="fw-bold" style={{ fontSize: "0.85rem", color: "#58a6ff" }}>
                       <i className="bi bi-bag-check me-2"></i>

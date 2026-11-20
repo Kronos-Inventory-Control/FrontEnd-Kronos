@@ -1,23 +1,23 @@
 import { useMemo, useRef, useState } from "react";
 import Swal from "sweetalert2";
 import "../../assets/css/S_reportes.css";
-import { guardarReporteLocal, eliminarReporteLocal, useReportesLocales } from "../../api/reportesLocales";
+import { supabase } from "../../api/supabase";
 import { useRealtimeTable } from "../../hooks/useRealtimeTable";
 import { useCategorias } from "../../hooks/useCategorias";
 
 /**
  * Gestión de Inventario · Reportes (conectado a Supabase en tiempo real)
  *
- *  - Los reportes se CALCULAN solos desde `inventarios` y `movimientos`
+ *  - Los reportes se CALCULAN solos desde `productos` y `movimientos`
  *    (ya no se escribe el tipo ni la cantidad a mano).
  *  - 5 tipos: Inventario general, Por reabastecer, Agotados,
  *    Valorización por categoría y Movimientos (entradas/salidas por fechas).
  *  - Filtro por categoría (las mismas de la tabla `categorias`).
  *  - Vista previa en vivo con resumen, gráfico de barras y tabla.
  *  - Exportar a CSV (abre en Excel) e imprimir / guardar como PDF.
- *  - "Guardar reporte" deja un registro en el historial (se guarda en este
- *    navegador: el diagrama de BD no tiene tabla de reportes). Desde el
- *    historial se puede volver a ver, descargar o eliminar.
+ *  - "Guardar reporte" deja un registro en `reportes_generados`
+ *    (historial en tiempo real). Desde el historial se puede volver a ver,
+ *    descargar o eliminar.
  */
 
 const SIN_CATEGORIA = "Sin categoría";
@@ -163,7 +163,7 @@ function construirReporte({ clave, categoria, desde, hasta, productos, movimient
         categoria: p.categoria || SIN_CATEGORIA,
         stock,
         umbral,
-        marca: p.marca || "—",
+        ubicacion: p.ubicacion || "—",
         precio,
         valor: stock * precio,
         estado: estadoDe(stock, umbral),
@@ -196,7 +196,7 @@ function construirReporte({ clave, categoria, desde, hasta, productos, movimient
             { clave: "codigo", etiqueta: "ID" },
             { clave: "nombre", etiqueta: "Material" },
             { clave: "categoria", etiqueta: "Categoría" },
-            { clave: "marca", etiqueta: "Marca" },
+            { clave: "ubicacion", etiqueta: "Ubicación" },
             { clave: "umbral", etiqueta: "Umbral", tipo: "numero" },
             { clave: "sugerido", etiqueta: "Pedir (sugerido)", tipo: "numero" },
             { clave: "precio", etiqueta: "Precio", tipo: "moneda" },
@@ -331,7 +331,7 @@ function construirReporte({ clave, categoria, desde, hasta, productos, movimient
           { clave: "categoria", etiqueta: "Categoría" },
           { clave: "stock", etiqueta: "Stock", tipo: "numero" },
           { clave: "umbral", etiqueta: "Umbral", tipo: "numero" },
-          { clave: "marca", etiqueta: "Marca" },
+          { clave: "ubicacion", etiqueta: "Ubicación" },
           { clave: "precio", etiqueta: "Precio", tipo: "moneda" },
           { clave: "valor", etiqueta: "Valor", tipo: "moneda" },
           { clave: "estado", etiqueta: "Estado", tipo: "estado" },
@@ -449,7 +449,10 @@ function imprimirReporte(reporte, titulo, subtitulo) {
 function S_reportes() {
   const { datos: productos, cargando: cargandoProductos } = useRealtimeTable("productos");
   const { datos: movimientos } = useRealtimeTable("movimientos");
-  const { datos: reportes, cargando: cargandoReportes } = useReportesLocales();
+  const { datos: reportes, cargando: cargandoReportes } = useRealtimeTable("reportes_generados", {
+    orderBy: "fecha",
+    ascending: false,
+  });
   const { categorias: categoriasTabla } = useCategorias();
 
   const [clave, setClave] = useState("general");
@@ -544,7 +547,12 @@ function S_reportes() {
         valor_total: reporte.valorTotal,
       };
 
-      guardarReporteLocal({ ...base, ...extra });
+      let resultado = await supabase.from("reportes_generados").insert({ ...base, ...extra });
+      // Si aún no corriste el SQL de columnas nuevas, guarda lo básico igual
+      if (resultado.error && /filtros|valor_total/i.test(resultado.error.message)) {
+        resultado = await supabase.from("reportes_generados").insert(base);
+      }
+      if (resultado.error) throw resultado.error;
 
       Swal.fire({
         icon: "success",
@@ -613,7 +621,8 @@ function S_reportes() {
     }).then(async (resultado) => {
       if (!resultado.isConfirmed) return;
       try {
-        eliminarReporteLocal(id);
+        const { error } = await supabase.from("reportes_generados").delete().eq("id", id);
+        if (error) throw error;
         Swal.fire({ icon: "success", title: "Eliminado", text: "El reporte ha sido borrado con éxito.", confirmButtonColor: "#37ac1d" });
       } catch (error) {
         Swal.fire({ icon: "error", title: "No se pudo eliminar", text: error.message, confirmButtonColor: "#f44336" });

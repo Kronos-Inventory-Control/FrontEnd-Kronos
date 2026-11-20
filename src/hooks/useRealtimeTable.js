@@ -1,22 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
 import { supabase } from "../api/supabase";
-import { CONJUNTOS } from "../api/db";
-
-let contadorCanales = 0;
-
-/** Ordena filas ya mapeadas por una clave (texto, número o fecha). */
-function ordenarFilas(filas, clave, ascendente) {
-  const dir = ascendente ? 1 : -1;
-  return [...filas].sort((a, b) => {
-    const x = a[clave];
-    const y = b[clave];
-    if (x == null && y == null) return 0;
-    if (x == null) return -dir;
-    if (y == null) return dir;
-    if (typeof x === "number" && typeof y === "number") return (x - y) * dir;
-    return String(x).localeCompare(String(y), "es", { numeric: true, sensitivity: "base" }) * dir;
-  });
-}
 
 /**
  * Hook genérico de lectura + tiempo real para una tabla de Supabase.
@@ -49,20 +32,18 @@ function ordenarFilas(filas, clave, ascendente) {
  *   setDatos: Function,
  * }}
  *
- * Si `tabla` es uno de los CONJUNTOS de src/api/db.js (productos, movimientos,
- * proveedores, ordenes_compra, pedidos_cliente, historial_compras, garantias,
- * alertas, categorias, marcas, unidades) los datos se arman uniendo las tablas
- * reales del diagrama y se escucha el realtime de TODAS ellas.
+ * NOTA IMPORTANTE: esta capa asume que las tablas y columnas descritas
+ * en cada página (productos, movimientos, proveedores, ordenes_compra,
+ * garantias, reportes_generados, perfiles) existen en tu proyecto de
+ * Supabase con esos nombres. Si tu esquema real usa otros nombres,
+ * basta con ajustar las constantes al inicio de cada página — toda la
+ * lógica de carga/realtime/errores vive aquí y no hay que tocarla.
  */
 export function useRealtimeTable(tabla, opciones = {}) {
   const { orderBy, ascending = false, select = "*", filtroColumna, filtroValor } = opciones;
   const [datos, setDatos] = useState([]);
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState(null);
-
-  // Conjuntos "virtuales" (productos, movimientos, garantias, ...): se arman
-  // en src/api/db.js uniendo varias tablas normalizadas del diagrama.
-  const conjunto = CONJUNTOS[tabla];
 
   // Si se pidió filtrar por columna pero el valor todavía no está listo
   // (ej. esperando el id del proveedor logueado), no consultamos nada.
@@ -77,27 +58,19 @@ export function useRealtimeTable(tabla, opciones = {}) {
     setCargando(true);
     setError(null);
     try {
-      let filas;
-      if (conjunto) {
-        filas = await conjunto.cargar();
-        if (filtroColumna) filas = filas.filter((f) => String(f[filtroColumna]) === String(filtroValor));
-        if (orderBy) filas = ordenarFilas(filas, orderBy, ascending);
-      } else {
-        let consulta = supabase.from(tabla).select(select);
-        if (filtroColumna) consulta = consulta.eq(filtroColumna, filtroValor);
-        if (orderBy) consulta = consulta.order(orderBy, { ascending });
-        const { data, error: errorConsulta } = await consulta;
-        if (errorConsulta) throw errorConsulta;
-        filas = data || [];
-      }
-      setDatos(filas);
+      let consulta = supabase.from(tabla).select(select);
+      if (filtroColumna && !filtroPendiente) consulta = consulta.eq(filtroColumna, filtroValor);
+      if (orderBy) consulta = consulta.order(orderBy, { ascending });
+      const { data, error: errorConsulta } = await consulta;
+      if (errorConsulta) throw errorConsulta;
+      setDatos(data || []);
     } catch (err) {
       console.error(`Error cargando "${tabla}":`, err.message);
       setError(err.message);
     } finally {
       setCargando(false);
     }
-  }, [tabla, conjunto, orderBy, ascending, select, filtroColumna, filtroValor, filtroPendiente]);
+  }, [tabla, orderBy, ascending, select, filtroColumna, filtroValor, filtroPendiente]);
 
   useEffect(() => {
     let activo = true;
@@ -105,39 +78,27 @@ export function useRealtimeTable(tabla, opciones = {}) {
 
     if (filtroPendiente) return undefined;
 
-    // Varias pantallas pueden usar el mismo conjunto a la vez: cada hook
-    // abre SU canal (nombre único) para no pisarse entre sí.
-    const tablasReales = conjunto ? conjunto.tablas : [tabla];
-    let temporizador = null;
-    const recargarSuave = () => {
-      // Un solo recargo aunque cambien varias tablas a la vez (p. ej. una venta).
-      clearTimeout(temporizador);
-      temporizador = setTimeout(() => {
-        if (activo) recargar();
-      }, 250);
-    };
-
-    let canal = supabase.channel(`rt:${tabla}:${++contadorCanales}`);
-    tablasReales.forEach((tablaReal) => {
-      canal = canal.on(
+    const canal = supabase
+      .channel(`realtime:${tabla}:${filtroColumna || "todo"}:${filtroValor || "-"}`)
+      .on(
         "postgres_changes",
         {
           event: "*",
           schema: "public",
-          table: tablaReal,
-          ...(!conjunto && filtroColumna ? { filter: `${filtroColumna}=eq.${filtroValor}` } : {}),
+          table: tabla,
+          ...(filtroColumna ? { filter: `${filtroColumna}=eq.${filtroValor}` } : {}),
         },
-        recargarSuave
-      );
-    });
-    canal.subscribe();
+        () => {
+          if (activo) recargar();
+        }
+      )
+      .subscribe();
 
     return () => {
       activo = false;
-      clearTimeout(temporizador);
       supabase.removeChannel(canal);
     };
-  }, [recargar, tabla, conjunto, filtroColumna, filtroValor, filtroPendiente]);
+  }, [recargar, tabla, filtroColumna, filtroValor, filtroPendiente]);
 
   return { datos, cargando, error, recargar, setDatos };
 }

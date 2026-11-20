@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import Swal from "sweetalert2";
 import "../../assets/css/D_garantia-cliente.css";
 import logoImg from "../../assets/img/logo.png";
-import { actualizarGarantia, radicarGarantia } from "../../api/db";
+import { supabase } from "../../api/supabase";
 import { useAuth } from "../../context/AuthContext";
 import { useRealtimeTable } from "../../hooks/useRealtimeTable";
 
@@ -95,11 +95,19 @@ export default function D_garantiasCliente() {
   const { usuario, perfil } = useAuth();
 
   // Conexiones en tiempo real Supabase (Rutas intactas del Archivo A)
+  // Ya no hay RLS por usuario (la sesión es de FastAPI): cada cliente pide solo lo suyo.
   const { datos: garantias, cargando, error } = useRealtimeTable("garantias", {
     orderBy: "fecha",
     ascending: false,
+    filtroColumna: "cliente_id",
+    filtroValor: usuario?.id,
   });
-  const { datos: pedidos } = useRealtimeTable("pedidos_cliente", { orderBy: "fecha", ascending: false });
+  const { datos: pedidos } = useRealtimeTable("ordenes_compra", {
+    orderBy: "fecha",
+    ascending: false,
+    filtroColumna: "cliente_id",
+    filtroValor: usuario?.id,
+  });
 
   // Filtros y búsquedas
   const [filtro, setFiltro] = useState("todos");
@@ -170,19 +178,42 @@ export default function D_garantiasCliente() {
     }
 
     setEnviando(true);
+    const fechaAhora = new Date().toISOString();
+    const clienteNombre = perfil?.nombre ? `${perfil.nombre} ${perfil.apellido || ""}`.trim() : usuario?.email || "Cliente";
+
+    const obsInicial = {
+      id: `obs-${Date.now()}`,
+      texto: observacion.trim() || "Solicitud registrada por el cliente.",
+      autor: "Cliente",
+      fecha: fechaAhora,
+    };
+
+    const bitInicial = {
+      id: `bit-${Date.now()}`,
+      accion: "Creación de Solicitud",
+      estado: "pendiente",
+      fecha: fechaAhora,
+      detalle: "Solicitud radicada en el portal del cliente.",
+    };
 
     try {
-      // garantias (por detalle de venta) + primera nota en garantiaBitacoras.
-      // El trigger de la base de datos fija la vigencia (fechaInicio/fechaFin)
-      // y escribe la bitácora "Creación de solicitud".
-      await radicarGarantia({
-        detalleId: pedidoSel.id,
-        tipoFalla: tipoReclamo,
-        motivo,
-        observacion: observacion.trim() || "Solicitud registrada por el cliente.",
-        evidencia: imagenSel,
-        autor: "Cliente",
+      const { error: errorInsert } = await supabase.from("garantias").insert({
+        orden_id: pedidoSel.id,
+        numero_orden: pedidoSel.codigo || `ORD-${pedidoSel.id}`,
+        cliente_id: usuario?.id,
+        cliente_nombre: clienteNombre,
+        cliente_destino: clienteNombre,
+        producto: pedidoSel.producto_nombre,
+        motivo: `${tipoReclamo}: ${motivo}`,
+        observacion: observacion.trim(),
+        imagen_nombre: imagenSel,
+        estado: "pendiente",
+        fecha: fechaAhora,
+        observaciones: [obsInicial],
+        bitacora: [bitInicial],
       });
+
+      if (errorInsert) throw errorInsert;
 
       Swal.fire({
         title: "Solicitud radicada",
@@ -218,13 +249,42 @@ export default function D_garantiasCliente() {
     if (!garantiaSel) return;
 
     setEnviando(true);
+    const fechaAhora = new Date().toISOString();
+
+    const nuevasObs = [...(garantiaSel.observaciones || [])];
+    if (observacion.trim()) {
+      nuevasObs.push({
+        id: `obs-${Date.now()}`,
+        texto: observacion.trim(),
+        autor: "Cliente",
+        fecha: fechaAhora,
+      });
+    }
+
+    const nuevaBitacora = [
+      ...(garantiaSel.bitacora || []),
+      {
+        id: `bit-${Date.now()}`,
+        accion: "Actualización de Solicitud",
+        estado: garantiaSel.estado,
+        fecha: fechaAhora,
+        detalle: "El cliente actualizó la información de la solicitud.",
+      },
+    ];
 
     try {
-      await actualizarGarantia(
-        garantiaSel.id,
-        { motivo, observacion: observacion.trim(), evidencia: imagenSel },
-        { autor: "Cliente", nota: observacion.trim() }
-      );
+      const { error: errorUpdate } = await supabase
+        .from("garantias")
+        .update({
+          motivo,
+          observacion: observacion.trim(),
+          imagen_nombre: imagenSel,
+          observaciones: nuevasObs,
+          bitacora: nuevaBitacora,
+        })
+        .eq("id", garantiaSel.id);
+
+      if (errorUpdate) throw errorUpdate;
 
       Swal.fire({
         title: "Garantía actualizada",
@@ -261,13 +321,28 @@ export default function D_garantiasCliente() {
     });
 
     if (res.isConfirmed) {
+      const fechaAhora = new Date().toISOString();
+      const nuevaBitacora = [
+        ...(g.bitacora || []),
+        {
+          id: `bit-${Date.now()}`,
+          accion: "Cancelación de Solicitud",
+          estado: "cancelada",
+          fecha: fechaAhora,
+          detalle: "El cliente canceló la solicitud de garantía.",
+        },
+      ];
+
       try {
-        // El cambio de estado queda en garantiaBitacoras (trigger) + nota del cliente.
-        await actualizarGarantia(
-          g.id,
-          { estado: "cancelada" },
-          { autor: "Cliente", nota: "El cliente canceló la solicitud de garantía." }
-        );
+        const { error: errorPatch } = await supabase
+          .from("garantias")
+          .update({
+            estado: "cancelada",
+            bitacora: nuevaBitacora,
+          })
+          .eq("id", g.id);
+
+        if (errorPatch) throw errorPatch;
 
         Swal.fire({
           title: "Solicitud cancelada",

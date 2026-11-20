@@ -3,12 +3,11 @@ import { useNavigate } from "react-router-dom";
 import Swal from "sweetalert2";
 import logoImg from "../../assets/img/logo.png";
 import { useAuth } from "../../context/AuthContext";
-import { registroDisponible, soloDigitos } from "../../api/db";
 import "../../assets/css/M_index.css";
 
 /**
- * Registro real: Supabase Auth + (por trigger) usuarios, direcciones y
- * clientes. La identificación (cédula) es la llave de `usuarios`.
+ * Registro real (Supabase Auth + tabla `perfiles`) migrado desde el
+ * proyecto de referencia, donde `handleSubmit` estaba vacío.
  *
  * Todo usuario que se registra aquí queda con rol "cliente" (es el
  * formulario público de "Regístrate para comprar"); los roles jefe /
@@ -20,7 +19,6 @@ export default function Registrarse({ abierto = true, alCerrar }) {
   const navigate = useNavigate();
 
   const [formData, setFormData] = useState({
-    identificacion: "",
     nombre: "",
     apellido: "",
     telefono: "",
@@ -60,35 +58,12 @@ export default function Registrarse({ abierto = true, alCerrar }) {
       return;
     }
 
-    const identificacion = soloDigitos(formData.identificacion);
-    if (identificacion.length < 5 || identificacion.length > 12) {
-      Swal.fire({
-        title: "Identificación no válida",
-        text: "Escribe tu número de cédula (solo números, entre 5 y 12 dígitos).",
-        icon: "warning",
-        confirmButtonColor: "#E8600C",
-        confirmButtonText: "Entendido",
-      });
-      return;
-    }
-
     setCargando(true);
     try {
       const { nombre, apellido, telefono, email, localidad, barrio, direccion, password } = formData;
-
-      const disponible = await registroDisponible(identificacion, email);
-      if (disponible !== "ok") {
-        throw new Error(
-          disponible === "identificacion"
-            ? "Ya existe una cuenta con esa identificación."
-            : "Ya existe una cuenta con ese correo electrónico."
-        );
-      }
-
       await registrarse({
         email,
         password,
-        identificacion,
         nombre,
         apellido,
         telefono,
@@ -132,10 +107,6 @@ export default function Registrarse({ abierto = true, alCerrar }) {
         <h2>Regístrate para comprar</h2>
       </div>
       <form className="modal__form" onSubmit={handleSubmit} autoComplete="off">
-        <div className="campo">
-          <label htmlFor="reg_identificacion">Identificación (cédula)</label>
-          <input type="text" inputMode="numeric" id="reg_identificacion" name="identificacion" value={formData.identificacion} onChange={handleChange} placeholder="Número de documento" required />
-        </div>
         <div className="campo">
           <label htmlFor="reg_nombre">Nombre</label>
           <input type="text" id="reg_nombre" name="nombre" value={formData.nombre} onChange={handleChange} placeholder="Nombre" required />

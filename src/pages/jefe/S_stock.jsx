@@ -2,18 +2,14 @@ import { useMemo, useRef, useState } from "react";
 import "../../assets/css/S_stock.css";
 import logo from "../../assets/img/logo.png";
 import { useRealtimeTable } from "../../hooks/useRealtimeTable";
-import {
-  actualizarProducto,
-  crearCategoria as crearCategoriaDB,
-  eliminarCategoria as eliminarCategoriaDB,
-  eliminarProducto as eliminarProductoDB,
-} from "../../api/db";
+// AJUSTA esta importación según cómo exportes el cliente en src/api/supabase.js
+import { supabase } from "../../api/supabase";
 
 /**
  * Gestión de Inventario · Stock (tiempo real con Supabase)
  *
- *  - Tablas: `inventarios` (+ `marcas`, `unidadVentas`) y `categorias` (ver KRONOS_ESQUEMA_V3.sql).
- *  - Categorías en tarjetas con icono (según su nombre) + cantidad de productos.
+ *  - Tablas: `productos` y `categorias` (ver categorias.sql).
+ *  - Categorías en tarjetas con icono + descripción + cantidad al seleccionar.
  *  - "Seleccionar todas" / "Limpiar".
  *  - Crear categoría nueva (sin repetidas, ignora mayúsculas, tildes y espacios).
  *  - Eliminar categoría (sus productos pasan a "Sin categoría"; todo en una sola transacción).
@@ -29,7 +25,7 @@ const COLUMNAS = [
   { clave: "nombre", etiqueta: "Material" },
   { clave: "categoria", etiqueta: "Categoría" },
   { clave: "stock_actual", etiqueta: "Stock Actual" },
-  { clave: "marca", etiqueta: "Marca" },
+  { clave: "ubicacion", etiqueta: "Ubicación en Bodega" },
   { clave: "precio", etiqueta: "Precio" },
 ];
 
@@ -84,23 +80,19 @@ const FORM_VACIO = {
   codigo: "",
   nombre: "",
   categoria: "",
-  marca: "",
-  modelo: "",
-  unidad: "",
   stock_actual: 0,
   umbral_minimo: 0,
+  ubicacion: "",
   precio: 0,
 };
 
-const FORM_CATEGORIA_VACIO = { nombre: "" };
+const FORM_CATEGORIA_VACIO = { nombre: "", descripcion: "", icono: "bi-tools" };
 
 function S_stock() {
   const { datos: productosRaw, cargando, error } = useRealtimeTable("productos", {
     orderBy: "nombre",
     ascending: true,
   });
-  const { datos: marcasDB } = useRealtimeTable("marcas", { orderBy: "nombre", ascending: true });
-  const { datos: unidadesDB } = useRealtimeTable("unidades", { orderBy: "nombre", ascending: true });
   const { datos: tablaCategoriasRaw } = useRealtimeTable("categorias", {
     orderBy: "nombre",
     ascending: true,
@@ -175,7 +167,11 @@ function S_stock() {
         id: categoria.id ?? null, // null = no existe como fila en la tabla `categorias`
         clave,
         nombre,
-        icono: adivinarIcono(nombre), // la tabla `categorias` no guarda icono: se deduce del nombre
+        descripcion: categoria.descripcion || "",
+        icono:
+          categoria.icono && categoria.icono !== ICONO_POR_DEFECTO
+            ? categoria.icono
+            : adivinarIcono(nombre),
         virtual,
         sinCategoria: nombre === SIN_CATEGORIA,
       });
@@ -300,13 +296,15 @@ function S_stock() {
     }
 
     setGuardandoCat(true);
-    let data;
-    let errorInsert = null;
-    try {
-      data = await crearCategoriaDB(nombre);
-    } catch (err) {
-      errorInsert = err;
-    }
+    const { data, error: errorInsert } = await supabase
+      .from("categorias")
+      .insert({
+        nombre,
+        descripcion: formCat.descripcion.trim() || null,
+        icono: formCat.icono,
+      })
+      .select()
+      .single();
     setGuardandoCat(false);
 
     if (errorInsert) {
@@ -340,21 +338,52 @@ function S_stock() {
 
     // Los productos de esta categoría pasan a "Sin categoría" y la categoría se
     // borra en UNA sola transacción: la función eliminar_categoria de Supabase
-    // (ver KRONOS_ESQUEMA_V3.sql) hace ambas cosas o ninguna.
+    // (ver eliminar-categoria-atomica.sql) hace ambas cosas o ninguna.
     const idsAfectados = productos
       .filter((p) => normalizar(p.categoria || SIN_CATEGORIA) === categoria.clave)
       .map((p) => p.id);
 
-    if (categoria.id) {
-      try {
-        await eliminarCategoriaDB(categoria.id);
-      } catch (errorRpc) {
-        setEliminandoCategoria(false);
-        setErrorEliminarCategoria(
-          `No se pudo eliminar la categoría (no se hizo ningún cambio): ${errorRpc.message}`
-        );
-        return;
+    const { error: errorRpc } = await supabase.rpc("eliminar_categoria", {
+      p_categoria_id: categoria.id != null ? String(categoria.id) : null,
+      p_producto_ids: idsAfectados,
+    });
+
+    // Si la función aún no existe en Supabase (PGRST202), no se bloquea al
+    // usuario: se elimina en dos pasos, como antes.
+    if (errorRpc && errorRpc.code === "PGRST202") {
+      if (idsAfectados.length > 0) {
+        const { error: errorMover } = await supabase
+          .from("productos")
+          .update({ categoria: SIN_CATEGORIA })
+          .in("id", idsAfectados);
+        if (errorMover) {
+          setEliminandoCategoria(false);
+          setErrorEliminarCategoria(`No se pudieron reasignar los productos: ${errorMover.message}`);
+          return;
+        }
       }
+      if (categoria.id) {
+        const { data: borradas, error: errorDelete } = await supabase
+          .from("categorias")
+          .delete()
+          .eq("id", categoria.id)
+          .select();
+        if (errorDelete || !borradas || borradas.length === 0) {
+          setEliminandoCategoria(false);
+          setErrorEliminarCategoria(
+            errorDelete
+              ? `No se pudo eliminar: ${errorDelete.message}`
+              : "Supabase no borró nada. Revisa que exista una política (RLS) de DELETE en la tabla categorias."
+          );
+          return;
+        }
+      }
+    } else if (errorRpc) {
+      setEliminandoCategoria(false);
+      setErrorEliminarCategoria(
+        `No se pudo eliminar la categoría (no se hizo ningún cambio): ${errorRpc.message}`
+      );
+      return;
     }
 
     if (categoria.id) {
@@ -385,9 +414,7 @@ function S_stock() {
       categoria: oficial && !oficial.sinCategoria ? oficial.nombre : "",
       stock_actual: fila.stock_actual ?? 0,
       umbral_minimo: fila.umbral_minimo ?? 0,
-      marca: fila.marca ?? "",
-      modelo: fila.modelo ?? "",
-      unidad: fila.unidad ?? "",
+      ubicacion: fila.ubicacion ?? "",
       precio: fila.precio ?? 0,
     });
   };
@@ -415,24 +442,18 @@ function S_stock() {
     }
 
     setGuardando(true);
-    let errorUpdate = null;
-    try {
-      // Si cambió el stock se registra como movimiento de ajuste (no se pisa el valor).
-      const actual = productos.find((p) => p.id === form.id);
-      await actualizarProducto(actual, {
-        codigo: form.codigo,
-        nombre: form.nombre,
+    const { error: errorUpdate } = await supabase
+      .from("productos")
+      .update({
+        codigo: form.codigo.trim(),
+        nombre: form.nombre.trim(),
         categoria: form.categoria,
-        marca: form.marca,
-        modelo: form.modelo,
-        unidad: form.unidad,
         stock_actual: Number(form.stock_actual),
         umbral_minimo: Number(form.umbral_minimo),
+        ubicacion: form.ubicacion.trim() || null,
         precio: Number(form.precio),
-      });
-    } catch (err) {
-      errorUpdate = err;
-    }
+      })
+      .eq("id", form.id);
     setGuardando(false);
 
     if (errorUpdate) {
@@ -456,19 +477,20 @@ function S_stock() {
 
     setErrorEliminarProducto("");
     setEliminandoProducto(true);
-    let errorDelete = null;
-    try {
-      await eliminarProductoDB(fila.id);
-    } catch (err) {
-      errorDelete = err;
-    }
+    const { data: borrados, error: errorDelete } = await supabase
+      .from("productos")
+      .delete()
+      .eq("id", fila.id)
+      .select();
     setEliminandoProducto(false);
 
     if (errorDelete) {
+      setErrorEliminarProducto(`No se pudo eliminar: ${errorDelete.message}`);
+      return;
+    }
+    if (!borrados || borrados.length === 0) {
       setErrorEliminarProducto(
-        errorDelete.code === "23503"
-          ? "Este material tiene ventas registradas y no se puede eliminar."
-          : `No se pudo eliminar: ${errorDelete.message}`
+        "Supabase no borró nada. Revisa que exista una política (RLS) de DELETE en la tabla productos."
       );
       return;
     }
@@ -536,7 +558,7 @@ function S_stock() {
                 <span className="categoria-info">
                   <span className="categoria-nombre">{categoria.nombre}</span>
                   <span className="categoria-desc">
-                    {conteoPorClave[categoria.clave] || 0} {(conteoPorClave[categoria.clave] || 0) === 1 ? "producto" : "productos"}
+                    {categoria.descripcion || "Sin descripción"}
                   </span>
                 </span>
                 {activa && (
@@ -629,7 +651,7 @@ function S_stock() {
                       <td>{fila.nombre}</td>
                       <td>{fila.categoria}</td>
                       <td>{fila.stock_actual}</td>
-                      <td>{fila.marca || "—"}</td>
+                      <td>{fila.ubicacion || "—"}</td>
                       <td>{fila.precio != null ? `$${Number(fila.precio).toLocaleString("es-CO")}` : "—"}</td>
                       <td className="text-center">
                         <button
@@ -720,8 +742,8 @@ function S_stock() {
                   <p><strong>Categoría:</strong></p>
                   <span>{productoSeleccionado?.categoria || "—"}</span>
 
-                  <p><strong>Marca / Modelo:</strong></p>
-                  <span>{[productoSeleccionado?.marca, productoSeleccionado?.modelo].filter(Boolean).join(" · ") || "—"}</span>
+                  <p><strong>Ubicación en Bodega:</strong></p>
+                  <span>{productoSeleccionado?.ubicacion || "—"}</span>
                 </div>
 
                 <div>
@@ -799,26 +821,8 @@ function S_stock() {
                   </select>
                 </div>
                 <div className="col-md-6">
-                  <label className="form-label">Marca</label>
-                  <input className="form-control" name="marca" list="listaMarcasStock" value={form.marca} onChange={manejarCambioForm} />
-                  <datalist id="listaMarcasStock">
-                    {marcasDB.map((m) => (
-                      <option key={m.id} value={m.nombre} />
-                    ))}
-                  </datalist>
-                </div>
-                <div className="col-md-6">
-                  <label className="form-label">Modelo o referencia</label>
-                  <input className="form-control" name="modelo" value={form.modelo} onChange={manejarCambioForm} />
-                </div>
-                <div className="col-md-6">
-                  <label className="form-label">Unidad de medida</label>
-                  <select className="form-select" name="unidad" value={form.unidad} onChange={manejarCambioForm}>
-                    <option value="">Sin unidad</option>
-                    {unidadesDB.map((u) => (
-                      <option key={u.id} value={u.nombre}>{u.nombre}</option>
-                    ))}
-                  </select>
+                  <label className="form-label">Ubicación en bodega</label>
+                  <input className="form-control" name="ubicacion" value={form.ubicacion} onChange={manejarCambioForm} />
                 </div>
 
                 <div className="col-md-4">
@@ -881,6 +885,35 @@ function S_stock() {
                 {nombreRepetido && (
                   <div className="invalid-feedback">Esa categoría ya existe.</div>
                 )}
+              </div>
+
+              <div className="mb-3">
+                <label className="form-label">Descripción</label>
+                <textarea
+                  className="form-control"
+                  rows="2"
+                  maxLength={120}
+                  placeholder="¿Qué productos incluye esta categoría?"
+                  value={formCat.descripcion}
+                  onChange={(e) => setFormCat((a) => ({ ...a, descripcion: e.target.value }))}
+                />
+              </div>
+
+              <div>
+                <label className="form-label">Icono</label>
+                <div className="selector-iconos">
+                  {ICONOS.map((icono) => (
+                    <button
+                      key={icono}
+                      type="button"
+                      aria-pressed={formCat.icono === icono}
+                      className={`icono-opcion ${formCat.icono === icono ? "activa" : ""}`}
+                      onClick={() => setFormCat((a) => ({ ...a, icono }))}
+                    >
+                      <i className={`bi ${icono}`}></i>
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
 

@@ -8,7 +8,7 @@ import { useRealtimeTable } from "./useRealtimeTable";
  *
  * Uso:
  *   const { categorias, cargando } = useCategorias();
- *   categorias -> [{ id, nombre }, ...]   (tabla `categorias`: idCategoria, nombreCategoria)
+ *   categorias -> [{ id, nombre, descripcion, icono }, ...]
  *
  * Ubicación sugerida: src/hooks/useCategorias.js
  */

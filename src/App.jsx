@@ -78,7 +78,7 @@ function App() {
         </Route>
       </Route>
 
-      <Route element={<ProtectedRoute allowedRoles={["administrador", "empleado"]} />}>
+      <Route element={<ProtectedRoute allowedRoles={["jefe", "administrador"]} />}>
         <Route path="/jefe" element={<JefeLayout />}>
           <Route index element={<Navigate to="panel" replace />} />
           <Route path="panel" element={<E_panel />} />

@@ -1,26 +1,32 @@
 import { useMemo, useState } from "react";
 import Swal from "sweetalert2";
 import "../../assets/css/M_entradas.css";
-import { actualizarProducto, crearProducto, registrarMovimiento } from "../../api/db";
+import { supabase } from "../../api/supabase";
 import { useRealtimeTable } from "../../hooks/useRealtimeTable";
+import { useAuth } from "../../context/AuthContext";
 import { useCategorias } from "../../hooks/useCategorias";
 
 /**
- * Movimientos · Registrar entrada de material (tablas `inventarios`,
- * `movimientos`, `categorias`, `marcas` y `unidadVentas`).
+ * Movimientos · Registrar entrada de material — ahora con afectación
+ * real de stock en Supabase (sección 4 del prompt):
  *
- *   - Si el nombre escrito coincide con un material ya existente en
- *     `inventarios`, se registra un movimiento de ENTRADA y la base de datos
- *     suma el stock sola (trigger). Nunca se escribe el stock a mano.
- *   - Si no existe, se da de alta el material (con su categoría, marca y
- *     unidad de medida, que se crean si aún no existen) y la cantidad entra
- *     como movimiento de entrada.
- *   - Cada movimiento guarda fecha, cantidad, precio, subtotal y el usuario
- *     autenticado (usuario_identificacion).
- *   - Si el material ya existía y cambiaste precio / marca / modelo, se
- *     actualizan; si los dejas vacíos NO se borra lo que ya había.
- *   - Alertas: si tras la entrada el stock sigue bajo el umbral, la alerta
- *     queda pendiente; si lo supera, se resuelve sola.
+ *   - Si el nombre escrito coincide con un producto ya existente en
+ *     `productos`, se SUMA la cantidad a su `stock_actual`.
+ *   - Si no existe, se crea un producto nuevo con esa cantidad como
+ *     stock inicial (usando marca/modelo/categoría como datos del
+ *     nuevo material, ya que el formulario original permitía ambos
+ *     casos: reabastecer o dar de alta un material).
+ *   - Cada operación queda registrada en `movimientos` con tipo
+ *     "entrada", cantidad, motivo, responsable (usuario autenticado)
+ *     y fecha.
+ *   - Precio unitario y ubicación en bodega:
+ *       · Material NUEVO  -> ambos son obligatorios y se guardan en `productos`.
+ *       · Material EXISTENTE -> se precargan con los valores actuales; si el
+ *         usuario los cambia se actualizan, y si los deja vacíos NO se borra
+ *         lo que ya había.
+ *   - Categorías: se leen en tiempo real de la tabla `categorias` de Supabase
+ *     (hook useCategorias), así que las que se crean o eliminan en Stock se
+ *     reflejan aquí al instante.
  */
 
 const ESTADO_INICIAL = {
@@ -29,7 +35,7 @@ const ESTADO_INICIAL = {
   marca: "",
   cantidad: 0,
   precio: "",
-  codigo: "",
+  ubicacion: "",
   modelo: "",
   categoria: "",
 };
@@ -38,9 +44,8 @@ function M_entrada() {
   const [form, setForm] = useState(ESTADO_INICIAL);
   const [guardando, setGuardando] = useState(false);
   const { datos: productos } = useRealtimeTable("productos");
-  const { datos: unidades } = useRealtimeTable("unidades", { orderBy: "nombre", ascending: true });
-  const { datos: marcas } = useRealtimeTable("marcas", { orderBy: "nombre", ascending: true });
   const { categorias } = useCategorias();
+  const { perfil, usuario } = useAuth();
 
   const actualizarCampo = (campo) => (evento) => {
     setForm((actual) => ({ ...actual, [campo]: evento.target.value }));
@@ -54,8 +59,15 @@ function M_entrada() {
     [productos, form.nombre]
   );
 
-  // Al elegir/escribir un material que ya existe, se precarga su precio
-  // actual para que el usuario solo lo corrija si cambió.
+  // Ubicaciones ya usadas: se sugieren al escribir para evitar variantes
+  // como "H1-A3", "h1 a3" o "H1A3" del mismo lugar.
+  const ubicacionesUsadas = useMemo(
+    () => [...new Set(productos.map((p) => (p.ubicacion || "").trim()).filter(Boolean))],
+    [productos]
+  );
+
+  // Al elegir/escribir un material que ya existe, se precargan su precio y
+  // ubicación actuales para que el usuario solo los corrija si cambiaron.
   const cambiarNombre = (evento) => {
     const valor = evento.target.value;
     const existente = productos.find((p) => normalizar(p.nombre) === normalizar(valor));
@@ -65,6 +77,7 @@ function M_entrada() {
       ...(existente
         ? {
             precio: existente.precio != null ? String(existente.precio) : "",
+            ubicacion: existente.ubicacion || "",
           }
         : {}),
     }));
@@ -85,6 +98,7 @@ function M_entrada() {
     }
 
     const precio = form.precio === "" ? null : Number(form.precio);
+    const ubicacion = form.ubicacion.trim();
 
     if (precio !== null && (Number.isNaN(precio) || precio < 0)) {
       Swal.fire({
@@ -96,11 +110,12 @@ function M_entrada() {
       return;
     }
 
-    // Un material nuevo nace con precio; si no, quedaría en "$0".
-    if (!productoExistente && precio === null) {
+    // Un material nuevo nace con precio y ubicación; si no, quedaría "$0" y
+    // sin lugar en bodega, que es justo lo que se quiere evitar.
+    if (!productoExistente && (precio === null || !ubicacion)) {
       Swal.fire({
         title: "Faltan datos del material nuevo",
-        text: "Para dar de alta un material nuevo indica su precio unitario.",
+        text: "Para dar de alta un material nuevo indica su precio unitario y su ubicación en bodega.",
         icon: "warning",
         confirmButtonColor: "#E8600C",
       });
@@ -123,34 +138,52 @@ function M_entrada() {
       let productoId = productoExistente?.id;
 
       if (productoExistente) {
+        const cambios = { stock_actual: (productoExistente.stock_actual || 0) + cantidad };
         // Solo se actualiza lo que el usuario realmente indicó y cambió.
-        const cambios = {};
         if (precio !== null && precio !== Number(productoExistente.precio)) cambios.precio = precio;
-        if (form.marca.trim() && form.marca.trim() !== productoExistente.marca) cambios.marca = form.marca;
-        if (form.modelo.trim() && form.modelo.trim() !== productoExistente.modelo) cambios.modelo = form.modelo;
-        if (form.unidad && form.unidad !== productoExistente.unidad) cambios.unidad = form.unidad;
-        if (Object.keys(cambios).length > 0) await actualizarProducto(productoExistente, cambios);
+        if (ubicacion && ubicacion !== (productoExistente.ubicacion || "")) cambios.ubicacion = ubicacion;
+
+        const { error } = await supabase
+          .from("productos")
+          .update(cambios)
+          .eq("id", productoExistente.id);
+        if (error) throw error;
       } else {
-        // Alta del material (stock en 0): la cantidad entra como movimiento.
-        productoId = await crearProducto({
-          nombre: form.nombre,
-          codigo: form.codigo,
-          categoria: form.categoria,
-          marca: form.marca,
-          unidad: form.unidad,
-          modelo: form.modelo,
-          precio,
-          umbral: 5,
-          stock: 0,
-        });
+        const { data, error } = await supabase
+          .from("productos")
+          .insert({
+            nombre: form.nombre.trim(),
+            categoria: form.categoria,
+            stock_actual: cantidad,
+            umbral_minimo: 5,
+            ubicacion,
+            precio,
+            codigo: form.modelo || null,
+            modelo: form.modelo || "",
+            marca: form.marca || "",
+            unidad: form.unidad || "",
+          })
+          .select()
+          .single();
+        if (error) throw error;
+        productoId = data.id;
       }
 
-      await registrarMovimiento({
-        productoId,
+      const detalles = ["Entrada de material"];
+      if (form.marca) detalles.push(`Marca: ${form.marca}`);
+      if (form.modelo) detalles.push(`Modelo: ${form.modelo}`);
+      if (precio !== null) detalles.push(`Precio unitario: $${precio.toLocaleString("es-CO")}`);
+      if (ubicacion) detalles.push(`Ubicación: ${ubicacion}`);
+
+      const responsable = perfil?.nombre || usuario?.email || "Jefe";
+      const { error: errorMovimiento } = await supabase.from("movimientos").insert({
+        producto_id: productoId,
         tipo: "entrada",
         cantidad,
-        precioUnitario: precio ?? productoExistente?.precio ?? 0,
+        motivo: detalles.join(" · "),
+        responsable,
       });
+      if (errorMovimiento) throw errorMovimiento;
 
       Swal.fire({
         title: "¡Entrada registrada!",
@@ -195,7 +228,7 @@ function M_entrada() {
               </datalist>
               <div className="form-text">
                 {productoExistente
-                  ? `Material existente (stock actual: ${productoExistente.stock_actual ?? 0}). Se sumará la cantidad; revisa que el precio siga vigente.`
+                  ? `Material existente (stock actual: ${productoExistente.stock_actual ?? 0}). Se sumará la cantidad; revisa que el precio y la ubicación sigan vigentes.`
                   : "Si el material ya existe, se sumará la cantidad a su stock actual; si no, se dará de alta como nuevo."}
               </div>
             </div>
@@ -208,9 +241,9 @@ function M_entrada() {
                 value={form.unidad}
                 onChange={actualizarCampo("unidad")}
               >
-                {(unidades.length > 0 ? unidades.map((u) => u.nombre) : ["Pieza", "Metros", "Kilogramos"]).map((nombre) => (
-                  <option key={nombre}>{nombre}</option>
-                ))}
+                <option>Pieza</option>
+                <option>Metros</option>
+                <option>Kilogramos</option>
               </select>
             </div>
 
@@ -221,15 +254,9 @@ function M_entrada() {
                 type="text"
                 className="form-control"
                 placeholder="Ej. Bosch"
-                list="listaMarcasEntrada"
                 value={form.marca}
                 onChange={actualizarCampo("marca")}
               />
-              <datalist id="listaMarcasEntrada">
-                {marcas.map((m) => (
-                  <option key={m.id} value={m.nombre} />
-                ))}
-              </datalist>
             </div>
 
             <div className="col-md-6">
@@ -259,16 +286,21 @@ function M_entrada() {
             </div>
 
             <div className="col-md-6">
-              <label className="form-label" htmlFor="ent-codigo">Código interno (opcional)</label>
+              <label className="form-label" htmlFor="ent-ubicacion">Ubicación en bodega</label>
               <input
-                id="ent-codigo"
+                id="ent-ubicacion"
                 type="text"
                 className="form-control"
-                placeholder="Ej. TOR-0020"
-                disabled={Boolean(productoExistente)}
-                value={form.codigo}
-                onChange={actualizarCampo("codigo")}
+                placeholder="Ej. Estantería A-12"
+                list="listaUbicacionesEntrada"
+                value={form.ubicacion}
+                onChange={actualizarCampo("ubicacion")}
               />
+              <datalist id="listaUbicacionesEntrada">
+                {ubicacionesUsadas.map((u) => (
+                  <option key={u} value={u} />
+                ))}
+              </datalist>
             </div>
 
             <div className="col-12">

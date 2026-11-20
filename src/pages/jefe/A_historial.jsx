@@ -3,24 +3,20 @@ import { Modal } from "bootstrap";
 import Swal from "sweetalert2";
 import "../../assets/css/A_historial-ordenes-jefe.css";
 import logo from "../../assets/img/logo.png";
-import { actualizarEstadoCompra } from "../../api/db";
+import { supabase } from "../../api/supabase";
 import { useRealtimeTable } from "../../hooks/useRealtimeTable";
 
 /**
- * Órdenes de Compra · Historial de Compras.
+ * Órdenes de Compra · Historial de Compras — conectado a la tabla
+ * `ordenes_compra` (sección 6 del prompt).
  *
- * Junta en un solo lugar las órdenes que genera el administrador a sus
- * proveedores (tabla `ordenesCompra`, origen "interno") y las compras que
- * hacen los clientes desde su portal (tablas `ventas` + `detalleVentas`,
- * origen "cliente"); en la columna "Proveedor / Cliente" se muestra el
- * nombre que corresponda. Al cambiar el estado + guardar una observación,
- * el `update` se sincroniza en tiempo real hacia quien esté viendo esa
- * orden (el cliente en /cliente/pedidos, el proveedor en su portal).
- *
- *   - Orden a proveedor "confirmada"  -> la base de datos registra la ENTRADA
- *     de inventario (movimiento tipo 3) y suma el stock.
- *   - Compra de cliente "rechazada"   -> la base de datos DEVUELVE el stock
- *     (movimiento tipo 5).
+ * Esa tabla integra en un solo lugar tanto las órdenes que genera el
+ * administrador (columna `origen = "interno"`, ligadas a un proveedor)
+ * como las que hace un cliente desde su portal (`origen = "cliente"`,
+ * ligadas a un `cliente_id`); aquí se muestra el nombre que corresponda
+ * en la columna "Proveedor / Cliente". Al cambiar el estado + guardar
+ * una observación, el `update` se sincroniza en tiempo real hacia
+ * cualquier cliente que esté viendo esa orden en /cliente/pedidos.
  */
 
 const BADGE_POR_ESTADO = {
@@ -39,7 +35,7 @@ const ETIQUETA_ESTADO = {
 const REGISTROS_POR_PAGINA = 5;
 
 function A_historial() {
-  const { datos: ordenes, cargando, error, setDatos } = useRealtimeTable("historial_compras", {
+  const { datos: ordenes, cargando, error, setDatos } = useRealtimeTable("ordenes_compra", {
     orderBy: "fecha",
     ascending: false,
   });
@@ -97,26 +93,27 @@ function A_historial() {
 
     setGuardando(true);
     try {
-      // Devuelve true solo si la base de datos realmente modificó filas.
-      // Sin esa comprobación, si las políticas RLS bloquean el update, Supabase
-      // responde "ok" con 0 filas y la pantalla parecería no hacer nada.
-      const aplicado = await actualizarEstadoCompra(ordenSeleccionada, nuevoEstado, observacion.trim());
-      if (!aplicado) {
+      // .select() devuelve las filas realmente modificadas. Sin esto, si las
+      // políticas RLS bloquean el update, Supabase responde "ok" con 0 filas
+      // y la pantalla parecería no hacer nada.
+      const { data: filasActualizadas, error: errorUpdate } = await supabase
+        .from("ordenes_compra")
+        .update({ estado: nuevoEstado, observacion: observacion.trim() })
+        .eq("id", ordenSeleccionada.id)
+        .select();
+      if (errorUpdate) throw errorUpdate;
+
+      if (!filasActualizadas || filasActualizadas.length === 0) {
         throw new Error(
-          "La base de datos no aplicó el cambio (0 filas actualizadas). Revisa que tu usuario tenga rol administrador/empleado y las políticas RLS de ordenesCompra / ventas."
+          "La base de datos no aplicó el cambio (0 filas actualizadas). Revisa que tu usuario tenga rol jefe/administrador y las políticas RLS de la tabla ordenes_compra."
         );
       }
 
-      // Actualiza la tabla al instante, sin esperar a Realtime. Las compras de
-      // cliente comparten estado por venta (todas sus filas cambian juntas).
+      // Actualiza la tabla al instante, sin esperar a Realtime. Si Realtime
+      // está activo, su recarga posterior simplemente confirma este mismo dato.
+      const ordenActualizada = filasActualizadas[0];
       setDatos((actuales) =>
-        actuales.map((orden) => {
-          const mismaCompra =
-            ordenSeleccionada.origen === "cliente"
-              ? orden.origen === "cliente" && orden.venta_id === ordenSeleccionada.venta_id
-              : orden.uid === ordenSeleccionada.uid;
-          return mismaCompra ? { ...orden, estado: nuevoEstado, observacion: observacion.trim() } : orden;
-        })
+        actuales.map((orden) => (orden.id === ordenActualizada.id ? { ...orden, ...ordenActualizada } : orden))
       );
 
       // NOTA: la salida de material (descuento de stock + fila en "movimientos")
@@ -149,7 +146,7 @@ function A_historial() {
           </div>
         </div>
 
-        {error && <div className="alert alert-danger">No se pudo conectar con las tablas de órdenes y ventas: {error}</div>}
+        {error && <div className="alert alert-danger">No se pudo conectar con la tabla "ordenes_compra": {error}</div>}
 
         <div className="buscarOrden">
           <i className="bi bi-search"></i>
@@ -187,7 +184,7 @@ function A_historial() {
                 </tr>
               ) : (
                 paginadas.map((orden) => (
-                  <tr key={orden.uid}>
+                  <tr key={orden.id}>
                     <td>{orden.codigo}</td>
                     <td>{orden.producto_nombre}</td>
                     <td className="text-center">{orden.cantidad}</td>

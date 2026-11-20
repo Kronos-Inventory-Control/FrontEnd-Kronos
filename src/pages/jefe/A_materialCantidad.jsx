@@ -3,15 +3,17 @@ import { Modal } from "bootstrap";
 import Swal from "sweetalert2";
 import "../../assets/css/A_materiales-ordenes-jefe.css";
 import logo from "../../assets/img/logo.png";
-import { crearOrdenesCompra } from "../../api/db";
+import { supabase } from "../../api/supabase";
 import { useRealtimeTable } from "../../hooks/useRealtimeTable";
 
 /**
  * Órdenes de Compra · Asociar Materiales / Generar Orden.
  *
- * Conectado en tiempo real a `inventarios` (catálogo con stock real) y a
- * `proveedores`. Al confirmar, se inserta una fila en `ordenesCompra` por
- * cada material del carrito (estado "pendiente").
+ * Conectado en tiempo real a `productos` (catálogo con stock real) y a
+ * `proveedores` (solo se listan los `activo = true`, según la sección 6
+ * del prompt: "carga en tiempo real únicamente los proveedores
+ * activos"). Al confirmar, se inserta una fila en `ordenes_compra` por
+ * cada material del carrito, con `origen: "interno"`.
  */
 
 function A_materialCantidad() {
@@ -74,15 +76,23 @@ function A_materialCantidad() {
 
     setEnviando(true);
     try {
-      const filas = carrito.map((item) => ({
-        codigo: `OC-${Date.now().toString().slice(-6)}-${item.id}`,
-        producto_id: item.id,
-        cantidad: item.cantidad,
-        proveedor_id: Number(proveedorPorMaterial[item.id]),
-        precio_unitario: item.precio || null,
-      }));
+      const filas = carrito.map((item) => {
+        const proveedor = proveedoresActivos.find((p) => String(p.id) === String(proveedorPorMaterial[item.id]));
+        return {
+          codigo: `OC-${Date.now().toString().slice(-6)}-${item.id}`,
+          producto_id: item.id,
+          producto_nombre: item.nombre,
+          cantidad: item.cantidad,
+          proveedor_id: proveedor?.id || null,
+          proveedor_nombre: proveedor?.nombre || null,
+          precio_unitario: item.precio || null,
+          origen: "interno",
+          estado: "pendiente",
+        };
+      });
 
-      await crearOrdenesCompra(filas);
+      const { error } = await supabase.from("ordenes_compra").insert(filas);
+      if (error) throw error;
 
       Modal.getOrCreateInstance("#modalAsociarProveedores").hide();
 

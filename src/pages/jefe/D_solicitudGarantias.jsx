@@ -5,27 +5,31 @@ import "../../assets/css/D_garantia-jefe.css";
 import "../../assets/css/D_garantia-modales.css";
 import logo from "../../assets/img/logo.png";
 import pulidoraAzul from "../../assets/img/pulidoraazul.jpeg";
-import { actualizarGarantia, eliminarGarantia, radicarGarantia } from "../../api/db";
+import { supabase } from "../../api/supabase";
 import { useRealtimeTable } from "../../hooks/useRealtimeTable";
 
 /**
- * Garantías · Solicitudes — conectado en tiempo real a Supabase
- * (`garantias` + `garantiaBitacoras`, unidas con `detalleVentas`, `ventas`,
- * `clientes` e `inventarios`).
+ * Garantías · Solicitudes — conectado en tiempo real a Supabase (tabla `garantias`).
+ * Permite listar, crear (radicar), actualizar estado/observaciones/bitácora y eliminar solicitudes,
+ * manteniendo la estética visual y la estructura de datos original.
  *
- * RADICACIÓN DESDE EL JEFE: el jefe elige primero el CLIENTE y luego una de
- * SUS compras (un producto de `detalleVentas`, ya confirmada). El N.º de
- * orden y el producto salen de esa compra real y la garantía queda ligada a
- * ese detalle de venta (así el cliente la ve en su portal y el proveedor
- * que surte ese producto la ve en el suyo, por RLS).
+ * RADICACIÓN DESDE EL JEFE: antes "Nueva solicitud" era un formulario
+ * 100% de texto libre (el jefe escribía a mano número de orden,
+ * cliente y producto), sin ningún vínculo real con los proveedores ni
+ * las órdenes de compra que ya existen en el sistema. Ahora el jefe
+ * primero elige un proveedor ya creado (tabla `proveedores`) y luego
+ * una de SUS órdenes de compra ya confirmadas (tabla `ordenes_compra`,
+ * filtradas por `proveedor_id` y `origen = "interno"`), con lo que el
+ * N.º de orden y el producto quedan tomados directamente de esa orden
+ * real y la garantía guarda `orden_id` (así el proveedor la ve en su
+ * propio portal, vía la política RLS que ya existe sobre `orden_id`).
  *
- * VIGENCIA: la garantía cubre GARANTIA_DIAS días desde la fecha de la venta
- * (la base de datos guarda ese rango en garantias.fechaInicio / fechaFin).
- * Si se vence, no se deja radicar. Para otra vigencia, ajusta esta constante
- * y el intervalo del trigger kronos_garantia_antes en el SQL.
- *
- * BITÁCORA: cada cambio de estado lo registra solo la base de datos; las
- * observaciones que escribe el jefe se anotan como "[Jefe] texto".
+ * "Depende de la fecha de la garantía": como no hay todavía una
+ * columna de "meses/días de garantía" por producto o proveedor, se usa
+ * una vigencia por defecto (GARANTIA_DIAS) contada desde la fecha de
+ * esa orden de compra. Si se vence, no se deja radicar contra esa
+ * orden. Si el negocio maneja una vigencia distinta por proveedor,
+ * basta con ajustar esta constante o cambiarla por una columna real.
  */
 
 const GARANTIA_DIAS = 90;
@@ -59,9 +63,13 @@ function D_solicitudGarantias() {
     ascending: false,
   });
 
-  // Compras de clientes ya existentes (ventas + detalleVentas), para radicar
-  // la garantía contra datos reales en vez de texto libre.
-  const { datos: compras } = useRealtimeTable("pedidos_cliente", {
+  // Proveedores y órdenes de compra ya existentes, para radicar la
+  // garantía contra datos reales en vez de texto libre.
+  const { datos: proveedores } = useRealtimeTable("proveedores", {
+    orderBy: "nombre",
+    ascending: true,
+  });
+  const { datos: ordenesCompra } = useRealtimeTable("ordenes_compra", {
     orderBy: "fecha",
     ascending: false,
   });
@@ -74,65 +82,57 @@ function D_solicitudGarantias() {
 
   // Estado para el formulario de Nueva Solicitud (Herencia del Archivo B_2)
   const [nuevoForm, setNuevoForm] = useState({
-    cliente_id: "",
+    proveedor_id: "",
     orden_id: "",
     numero_orden: "",
     cliente_nombre: "",
     producto: "",
     motivo: "",
-    tipo_falla: "",
     observacion: "",
     correo: "",
   });
   const [creando, setCreando] = useState(false);
 
-  // Clientes con al menos una compra confirmada.
-  const clientesConCompras = useMemo(() => {
-    const mapa = new Map();
-    compras
-      .filter((c) => c.estado === "confirmada")
-      .forEach((c) => mapa.set(String(c.cliente_id), c.cliente_nombre));
-    return [...mapa.entries()].map(([id, nombre]) => ({ id, nombre })).sort((a, b) => a.nombre.localeCompare(b.nombre));
-  }, [compras]);
-
-  // Compras confirmadas del cliente seleccionado.
-  const comprasDelCliente = useMemo(() => {
-    if (!nuevoForm.cliente_id) return [];
-    return compras.filter(
-      (c) => String(c.cliente_id) === String(nuevoForm.cliente_id) && c.estado === "confirmada"
+  // Órdenes de compra confirmadas del proveedor seleccionado (las
+  // órdenes "de cliente" no aplican aquí: la garantía del jefe es
+  // frente al proveedor que le vendió el material).
+  const ordenesDelProveedor = useMemo(() => {
+    if (!nuevoForm.proveedor_id) return [];
+    return ordenesCompra.filter(
+      (orden) =>
+        String(orden.proveedor_id) === String(nuevoForm.proveedor_id) &&
+        orden.origen === "interno" &&
+        orden.estado === "confirmada"
     );
-  }, [compras, nuevoForm.cliente_id]);
+  }, [ordenesCompra, nuevoForm.proveedor_id]);
 
-  const compraSeleccionada = useMemo(
-    () => comprasDelCliente.find((c) => String(c.id) === String(nuevoForm.orden_id)) || null,
-    [comprasDelCliente, nuevoForm.orden_id]
+  const ordenSeleccionada = useMemo(
+    () => ordenesDelProveedor.find((o) => String(o.id) === String(nuevoForm.orden_id)) || null,
+    [ordenesDelProveedor, nuevoForm.orden_id]
   );
 
   const vigenciaSeleccionada = useMemo(
-    () => (compraSeleccionada ? calcularVigenciaGarantia(compraSeleccionada.fecha) : null),
-    [compraSeleccionada]
+    () => (ordenSeleccionada ? calcularVigenciaGarantia(ordenSeleccionada.fecha) : null),
+    [ordenSeleccionada]
   );
 
-  const alCambiarCliente = (clienteId) => {
-    const cliente = clientesConCompras.find((c) => c.id === String(clienteId));
+  const alCambiarProveedor = (proveedorId) => {
     setNuevoForm((actual) => ({
       ...actual,
-      cliente_id: clienteId,
-      cliente_nombre: cliente?.nombre || "",
+      proveedor_id: proveedorId,
       orden_id: "",
       numero_orden: "",
       producto: "",
     }));
   };
 
-  const alCambiarCompra = (compraId) => {
-    const compra = comprasDelCliente.find((c) => String(c.id) === String(compraId));
+  const alCambiarOrden = (ordenId) => {
+    const orden = ordenesDelProveedor.find((o) => String(o.id) === String(ordenId));
     setNuevoForm((actual) => ({
       ...actual,
-      orden_id: compraId,
-      numero_orden: compra?.codigo || "",
-      producto: compra?.producto_nombre || "",
-      correo: compra?.cliente_correo || "",
+      orden_id: ordenId,
+      numero_orden: orden?.codigo || "",
+      producto: orden?.producto_nombre || "",
     }));
   };
 
@@ -149,13 +149,40 @@ function D_solicitudGarantias() {
     if (!seleccionada) return;
     setGuardando(true);
     try {
-      // El cambio de estado lo anota solo la base de datos en garantiaBitacoras;
-      // la observación del jefe queda como nota firmada.
-      await actualizarGarantia(
-        seleccionada.id,
-        { estado: estadoEdicion, observacion: observacionEdicion },
-        { autor: "Jefe", nota: observacionEdicion }
-      );
+      const ahora = new Date().toISOString();
+
+      // Construcción de la observación acumulada y bitácora heredada del Archivo B_2
+      const nuevaObs = {
+        id: `obs-${Date.now()}`,
+        texto: observacionEdicion,
+        estado: estadoEdicion,
+        responsable: "Jefe de Garantías",
+        fecha: ahora,
+      };
+
+      const nuevaBit = {
+        id: `bit-${Date.now()}`,
+        accion: "Cambio de estado",
+        estado: estadoEdicion,
+        responsable: "Jefe de Garantías",
+        fecha: ahora,
+        observacion: observacionEdicion,
+      };
+
+      const obsActuales = Array.isArray(seleccionada.observaciones) ? seleccionada.observaciones : [];
+      const bitActuales = Array.isArray(seleccionada.bitacora) ? seleccionada.bitacora : [];
+
+      const { error: errorUpdate } = await supabase
+        .from("garantias")
+        .update({
+          estado: estadoEdicion,
+          observacion: observacionEdicion,
+          observaciones: [...obsActuales, nuevaObs],
+          bitacora: [...bitActuales, nuevaBit],
+        })
+        .eq("id", seleccionada.id);
+
+      if (errorUpdate) throw errorUpdate;
 
       Swal.fire({
         icon: "success",
@@ -179,21 +206,21 @@ function D_solicitudGarantias() {
   const crearSolicitud = async (e) => {
     e.preventDefault();
 
-    if (!nuevoForm.cliente_id) {
+    if (!nuevoForm.proveedor_id) {
       Swal.fire({
         icon: "warning",
-        title: "Selecciona un cliente",
-        text: "La garantía debe radicarse sobre la compra de un cliente registrado.",
+        title: "Selecciona un proveedor",
+        text: "La garantía debe radicarse contra un proveedor ya registrado.",
         confirmButtonColor: "#8d86c9",
       });
       return;
     }
 
-    if (!nuevoForm.orden_id || !compraSeleccionada) {
+    if (!nuevoForm.orden_id || !ordenSeleccionada) {
       Swal.fire({
         icon: "warning",
-        title: "Selecciona una compra",
-        text: "Elige la compra de ese cliente sobre la que aplica la garantía.",
+        title: "Selecciona una orden de compra",
+        text: "Elige la orden de compra de ese proveedor sobre la que aplica la garantía.",
         confirmButtonColor: "#8d86c9",
       });
       return;
@@ -203,22 +230,58 @@ function D_solicitudGarantias() {
       Swal.fire({
         icon: "error",
         title: "Garantía vencida",
-        text: `Esa compra se hizo hace ${vigenciaSeleccionada.diasTranscurridos} día(s), fuera de los ${GARANTIA_DIAS} días de garantía. No es posible radicar una solicitud contra ella.`,
+        text: `Esa orden se recibió hace ${vigenciaSeleccionada.diasTranscurridos} día(s), fuera de los ${GARANTIA_DIAS} días de garantía. No es posible radicar una solicitud contra ella.`,
         confirmButtonColor: "#933c9e",
+      });
+      return;
+    }
+
+    if (!nuevoForm.cliente_nombre) {
+      Swal.fire({
+        icon: "warning",
+        title: "Campos incompletos",
+        text: "Indica el cliente o destino de esta garantía.",
+        confirmButtonColor: "#8d86c9",
       });
       return;
     }
 
     setCreando(true);
     try {
-      await radicarGarantia({
-        detalleId: Number(nuevoForm.orden_id),
-        tipoFalla: nuevoForm.tipo_falla,
-        motivo: nuevoForm.motivo,
+      const ahora = new Date().toISOString();
+      const obsInicial = {
+        id: `obs-${Date.now()}`,
+        texto: nuevoForm.observacion || "Solicitud creada.",
+        estado: "pendiente",
+        responsable: "Jefe de Garantías",
+        fecha: ahora,
+      };
+
+      const bitInicial = {
+        id: `bit-${Date.now()}`,
+        accion: "Creación de solicitud",
+        estado: "pendiente",
+        responsable: "Jefe de Garantías",
+        fecha: ahora,
         observacion: nuevoForm.observacion || "Solicitud creada.",
-        evidencia: null,
-        autor: "Jefe",
-      });
+      };
+
+      const payload = {
+        orden_id: nuevoForm.orden_id,
+        numero_orden: nuevoForm.numero_orden,
+        cliente_nombre: nuevoForm.cliente_nombre,
+        producto: nuevoForm.producto,
+        motivo: nuevoForm.motivo,
+        observacion: nuevoForm.observacion,
+        correo: nuevoForm.correo,
+        estado: "pendiente",
+        fecha: ahora,
+        observaciones: [obsInicial],
+        bitacora: [bitInicial],
+      };
+
+      const { error: errorInsert } = await supabase.from("garantias").insert([payload]);
+      if (errorInsert) throw errorInsert;
 
       Swal.fire({
         icon: "success",
@@ -228,13 +291,12 @@ function D_solicitudGarantias() {
       });
 
       setNuevoForm({
-        cliente_id: "",
+        proveedor_id: "",
         orden_id: "",
         numero_orden: "",
         cliente_nombre: "",
         producto: "",
         motivo: "",
-        tipo_falla: "",
         observacion: "",
         correo: "",
       });
@@ -265,7 +327,8 @@ function D_solicitudGarantias() {
 
     if (res.isConfirmed) {
       try {
-        await eliminarGarantia(id);
+        const { error: errorDelete } = await supabase.from("garantias").delete().eq("id", id);
+        if (errorDelete) throw errorDelete;
 
         Swal.fire({
           icon: "success",
@@ -399,41 +462,43 @@ function D_solicitudGarantias() {
             <div className="modal-body">
               <div className="row g-3">
                 <div className="col-md-6">
-                  <label className="form-label">Cliente *</label>
+                  <label className="form-label">Proveedor *</label>
                   <select
                     className="form-select"
                     required
-                    value={nuevoForm.cliente_id}
-                    onChange={(e) => alCambiarCliente(e.target.value)}
+                    value={nuevoForm.proveedor_id}
+                    onChange={(e) => alCambiarProveedor(e.target.value)}
                   >
-                    <option value="">
-                      {clientesConCompras.length === 0 ? "No hay compras confirmadas" : "Selecciona un cliente…"}
-                    </option>
-                    {clientesConCompras.map((c) => (
-                      <option key={c.id} value={c.id}>{c.nombre}</option>
+                    <option value="">Selecciona un proveedor…</option>
+                    {proveedores.map((p) => (
+                      <option key={p.id} value={p.id}>{p.nombre}</option>
                     ))}
                   </select>
                 </div>
 
                 <div className="col-md-6">
-                  <label className="form-label">Compra *</label>
+                  <label className="form-label">Orden de compra *</label>
                   <select
                     className="form-select"
                     required
-                    disabled={!nuevoForm.cliente_id}
+                    disabled={!nuevoForm.proveedor_id}
                     value={nuevoForm.orden_id}
-                    onChange={(e) => alCambiarCompra(e.target.value)}
+                    onChange={(e) => alCambiarOrden(e.target.value)}
                   >
                     <option value="">
-                      {nuevoForm.cliente_id ? "Selecciona una compra…" : "Primero elige un cliente"}
+                      {nuevoForm.proveedor_id
+                        ? ordenesDelProveedor.length === 0
+                          ? "Este proveedor no tiene órdenes confirmadas"
+                          : "Selecciona una orden…"
+                        : "Primero elige un proveedor"}
                     </option>
-                    {comprasDelCliente.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        #{c.codigo} · {c.producto_nombre} · {c.fecha ? new Date(c.fecha).toLocaleDateString("es-CO") : "—"}
+                    {ordenesDelProveedor.map((orden) => (
+                      <option key={orden.id} value={orden.id}>
+                        #{orden.codigo} · {orden.producto_nombre} · {orden.fecha ? new Date(orden.fecha).toLocaleDateString("es-CO") : "—"}
                       </option>
                     ))}
                   </select>
-                  {compraSeleccionada && vigenciaSeleccionada && (
+                  {ordenSeleccionada && vigenciaSeleccionada && (
                     <div className={`gm-vigencia ${vigenciaSeleccionada.vigente ? "gm-vigencia--ok" : "gm-vigencia--vencida"}`}>
                       <i className={`bi ${vigenciaSeleccionada.vigente ? "bi-patch-check-fill" : "bi-exclamation-triangle-fill"}`}></i>
                       {vigenciaSeleccionada.vigente
@@ -445,28 +510,31 @@ function D_solicitudGarantias() {
 
                 <div className="col-md-6">
                   <label className="form-label">N.º de Orden / Factura</label>
-                  <input type="text" className="form-control" readOnly value={nuevoForm.numero_orden} placeholder="Se completa al elegir la compra" />
+                  <input type="text" className="form-control" readOnly value={nuevoForm.numero_orden} placeholder="Se completa al elegir la orden" />
                 </div>
                 <div className="col-md-6">
                   <label className="form-label">Producto</label>
-                  <input type="text" className="form-control" readOnly value={nuevoForm.producto} placeholder="Se completa al elegir la compra" />
+                  <input type="text" className="form-control" readOnly value={nuevoForm.producto} placeholder="Se completa al elegir la orden" />
                 </div>
                 <div className="col-md-6">
-                  <label className="form-label">Correo del cliente</label>
-                  <input type="email" className="form-control" readOnly value={nuevoForm.correo} />
+                  <label className="form-label">Cliente / Destino *</label>
+                  <input
+                    type="text"
+                    className="form-control"
+                    required
+                    placeholder="¿A quién afecta este reclamo?"
+                    value={nuevoForm.cliente_nombre}
+                    onChange={(e) => setNuevoForm({ ...nuevoForm, cliente_nombre: e.target.value })}
+                  />
                 </div>
                 <div className="col-md-6">
-                  <label className="form-label">Tipo de falla</label>
-                  <select
-                    className="form-select"
-                    value={nuevoForm.tipo_falla}
-                    onChange={(e) => setNuevoForm({ ...nuevoForm, tipo_falla: e.target.value })}
-                  >
-                    <option value="">Selecciona…</option>
-                    {["Fallo de Fábrica", "Producto Defectuoso", "Avería en Transporte", "Faltan piezas"].map((t) => (
-                      <option key={t} value={t}>{t}</option>
-                    ))}
-                  </select>
+                  <label className="form-label">Correo electrónico</label>
+                  <input
+                    type="email"
+                    className="form-control"
+                    value={nuevoForm.correo}
+                    onChange={(e) => setNuevoForm({ ...nuevoForm, correo: e.target.value })}
+                  />
                 </div>
                 <div className="col-12">
                   <label className="form-label">Motivo del reclamo</label>

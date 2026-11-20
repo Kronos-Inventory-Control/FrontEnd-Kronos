@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import Swal from "sweetalert2";
 import logo from "../../assets/img/logo.png";
-import { actualizarGarantia } from "../../api/db";
+import { supabase } from "../../api/supabase";
 import { useMiProveedor } from "../../hooks/useMiProveedor";
 import { useRealtimeTable } from "../../hooks/useRealtimeTable";
 
@@ -19,7 +19,7 @@ const ETIQUETA_ESTADO = Object.fromEntries(PASOS_ESTADO.map((p) => [p.valor, p.e
  * aprobar/rechazar — como se acordó en la reunión del 16/09).
  *
  * `garantias` no tiene una columna `proveedor_id` propia: se relaciona
- * con el proveedor a través de detalleVentas -> inventarios -> ordenesCompra. Por eso:
+ * con `ordenes_compra` a través de `garantias.orden_id`. Por eso:
  *   1. Primero se traen (en tiempo real) las órdenes de ESTE proveedor.
  *   2. Luego se traen todas las `garantias` y se filtran del lado del
  *      cliente, quedándonos solo con las que apuntan a una orden suya.
@@ -41,13 +41,10 @@ export default function D_garantiasProveedor() {
     ascending: false,
   });
 
-  // Una garantía es del proveedor si el producto reclamado es de los que él
-  // surte (ordenesCompra.inventario_codInventario). La base de datos ya filtra
-  // lo mismo por RLS; esto solo lo deja explícito en pantalla.
-  const misProductosIds = useMemo(() => new Set(misOrdenes.map((o) => o.producto_id)), [misOrdenes]);
+  const misOrdenesIds = useMemo(() => new Set(misOrdenes.map((o) => o.id)), [misOrdenes]);
   const garantias = useMemo(
-    () => todasLasGarantias.filter((g) => misProductosIds.has(g.producto_id)),
-    [todasLasGarantias, misProductosIds]
+    () => todasLasGarantias.filter((g) => misOrdenesIds.has(g.orden_id)),
+    [todasLasGarantias, misOrdenesIds]
   );
 
   const [solicitudSeleccionada, setSolicitudSeleccionada] = useState(null);
@@ -59,13 +56,11 @@ export default function D_garantiasProveedor() {
     if (!solicitudSeleccionada) return;
     setGuardando(true);
     try {
-      // El cambio de estado queda en garantiaBitacoras (trigger) y el motivo
-      // como nota firmada por el proveedor.
-      await actualizarGarantia(
-        solicitudSeleccionada.id,
-        { estado: nuevoEstado, observacion },
-        { autor: "Proveedor", nota: observacion }
-      );
+      const { error: errorUpdate } = await supabase
+        .from("garantias")
+        .update({ estado: nuevoEstado, observacion })
+        .eq("id", solicitudSeleccionada.id);
+      if (errorUpdate) throw errorUpdate;
 
       setSolicitudSeleccionada((prev) => (prev ? { ...prev, estado: nuevoEstado, observacion } : prev));
     } catch (err) {

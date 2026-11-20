@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Modal } from "bootstrap";
 import Swal from "sweetalert2";
-import { actualizarEstadoCompra } from "../../api/db";
+import { supabase } from "../../api/supabase";
 import { useMiProveedor } from "../../hooks/useMiProveedor";
 import { useRealtimeTable } from "../../hooks/useRealtimeTable";
 
@@ -20,7 +20,7 @@ const ETIQUETA_ESTADO = {
 /**
  * Portal del proveedor · Órdenes de compra.
  *
- * Conectado en tiempo real a `ordenesCompra` (misma tabla que usa el
+ * Conectado en tiempo real a `ordenes_compra` (misma tabla que usa el
  * jefe en A_historial.jsx), filtrado por `proveedor_id` = la ficha de
  * este proveedor. Cada fila de esa tabla YA es un material con su
  * cantidad (no existe una lista de "materiales" por orden en el
@@ -72,8 +72,11 @@ export default function ProveedorOrdenes() {
     if (!ordenSeleccionada) return;
     setGuardando(true);
     try {
-      const aplicado = await actualizarEstadoCompra(ordenSeleccionada, nuevoEstado, observacion);
-      if (!aplicado) throw new Error("No se aplicó el cambio: la orden ya no está disponible para tu cuenta.");
+      const { error: errorUpdate } = await supabase
+        .from("ordenes_compra")
+        .update({ estado: nuevoEstado, observacion })
+        .eq("id", ordenSeleccionada.id);
+      if (errorUpdate) throw errorUpdate;
 
       cerrarModal();
       Swal.fire({

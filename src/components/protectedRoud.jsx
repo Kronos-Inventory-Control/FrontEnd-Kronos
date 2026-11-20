@@ -33,7 +33,7 @@ function ProtectedRoute({ allowedRoles }) {
   }
 
   if (allowedRoles && !allowedRoles.includes(rol)) {
-    const destinoPorRol = rol === "administrador" || rol === "empleado"
+    const destinoPorRol = rol === "jefe" || rol === "administrador"
       ? "/jefe/panel"
       : rol === "cliente"
         ? "/cliente/pedidos"

@@ -2,18 +2,18 @@ import { useMemo, useState } from "react";
 import { Modal } from "bootstrap";
 import Swal from "sweetalert2";
 import "../../assets/css/A_registrarPorveedor-jefe.css";
-import { actualizarProveedor, crearProveedor, eliminarProveedor as eliminarProveedorDB } from "../../api/db";
+import { supabase } from "../../api/supabase";
 import { useRealtimeTable } from "../../hooks/useRealtimeTable";
 
 /**
- * Proveedores · CRUD completo conectado a `usuarios` (rol Proveedor),
- * `direcciones` y `proveedores` de Supabase.
- *   - Crear: crea en una sola transacción el usuario (rol Proveedor, la
- *     identificación es el NIT o cédula), su dirección y su ficha.
- *   - Acceso al portal: el proveedor entra con el MISMO correo con el que
- *     lo registraste (al crear su cuenta se vincula solo a esta ficha).
- *   - Leer / Buscar: tabla + buscador en tiempo real.
- *   - Actualizar / Eliminar: con confirmación de SweetAlert2.
+ * Proveedores · CRUD completo conectado a la tabla `proveedores` de
+ * Supabase (sección 5 del prompt):
+ *   - Crear: modal con insert.
+ *   - Leer / Buscar: tabla + buscador en tiempo real (client-side,
+ *     sobre datos ya sincronizados por postgres_changes).
+ *   - Actualizar: el botón de editar ahora sí abre el modal
+ *     precargado y hace un update (antes no tenía lógica).
+ *   - Eliminar: igual que antes, con confirmación de SweetAlert2.
  */
 
 const REGISTROS_POR_PAGINA = 5;
@@ -78,7 +78,11 @@ function A_registrarProveedor() {
     setGuardando(true);
     try {
       if (editandoId) {
-        await actualizarProveedor(editandoId, form);
+        const { error: errorUpdate } = await supabase
+          .from("proveedores")
+          .update(form)
+          .eq("id", editandoId);
+        if (errorUpdate) throw errorUpdate;
 
         Swal.fire({
           icon: "success",
@@ -87,7 +91,8 @@ function A_registrarProveedor() {
           confirmButtonColor: "#8d86c9",
         });
       } else {
-        await crearProveedor(form);
+        const { error: errorInsert } = await supabase.from("proveedores").insert({ ...form, activo: true });
+        if (errorInsert) throw errorInsert;
 
         Swal.fire({
           icon: "success",
@@ -120,7 +125,8 @@ function A_registrarProveedor() {
     }).then(async (resultado) => {
       if (!resultado.isConfirmed) return;
       try {
-        await eliminarProveedorDB(id);
+        const { error: errorDelete } = await supabase.from("proveedores").delete().eq("id", id);
+        if (errorDelete) throw errorDelete;
         Swal.fire({
           icon: "success",
           title: "Eliminado",

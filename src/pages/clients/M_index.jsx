@@ -16,7 +16,6 @@ import Registrarse from '../auth/Registrarse';
 import Swal from 'sweetalert2';
 import { useAuth } from '../../context/AuthContext';
 import { supabase } from '../../api/supabase';
-import { cargarPedidosCliente, marcarCarritoActivo, registrarVenta } from '../../api/db';
 import { useRealtimeTable } from '../../hooks/useRealtimeTable';
 import ModalPerfilCliente from '../../components/ModalPerfilCliente';
 
@@ -135,9 +134,10 @@ const COLOR_ESTADO = {
   rechazada: "#ef4444",
 };
 
-// Cada compra es una venta ("PED-<idVenta>") con una fila por producto (detalleVentas):
-// agrupar por ese código junta todos los productos de una misma compra.
-const codigoDePedido = (fila) => String(fila.codigo ?? fila.id);
+// Los códigos nuevos son "PED-123456-<n>" (n = posición del producto en la compra); se quita el sufijo para
+// agrupar todos los productos de una misma compra.
+const codigoDePedido = (fila) =>
+  String(fila.codigo ?? fila.id).replace(/-\d+$/, "");
 
 const imagenDeProducto = (nombre) =>
   presentacionDe(nombre)?.imagen || null;
@@ -173,7 +173,7 @@ export default function M_index() {
           precioAntes: presentacion?.precioAntes ?? null,
           etiqueta: stock <= 0 ? "Agotado" : presentacion?.etiqueta || "Disponible",
           estado: presentacion?.estado || "nuevo",
-          imagen: presentacion?.imagen || p.imagen || null,
+          imagen: presentacion?.imagen || null,
           stock,
         };
       }),
@@ -194,7 +194,7 @@ export default function M_index() {
   const [busquedaCatalogo, setBusquedaCatalogo] = useState('');
   const [enviandoCompra, setEnviandoCompra] = useState(false);
 
-  // Pedidos reales del cliente (tablas ventas + detalleVentas)
+  // Pedidos reales del cliente (tabla ordenes_compra)
   const [pedidosCliente, setPedidosCliente] = useState([]);
   const [cargandoPedidos, setCargandoPedidos] = useState(false);
 
@@ -206,14 +206,6 @@ export default function M_index() {
     setAgregadoId(id);
     setTimeout(() => setAgregadoId((actual) => (actual === id ? null : actual)), 1400);
   };
-
-  // clientes.carritoActivo: refleja si el cliente tiene productos en el carrito.
-  const clienteId = perfil?.cliente_id;
-  const hayCarrito = carrito.length > 0;
-  useEffect(() => {
-    if (!clienteId) return;
-    marcarCarritoActivo(clienteId, hayCarrito);
-  }, [clienteId, hayCarrito]);
 
   const banners = [bannerActualizadoImg, bannerOfertasImg];
 
@@ -239,16 +231,13 @@ export default function M_index() {
     let activo = true;
     const cargar = async () => {
       setCargandoPedidos(true);
-      let filas = [];
-      try {
-        // ventas + detalleVentas (por RLS el cliente solo recibe las suyas)
-        filas = await cargarPedidosCliente();
-      } catch (err) {
-        console.error("No se pudieron cargar los pedidos:", err.message);
-      }
-      filas.sort((x, y) => new Date(y.fecha) - new Date(x.fecha));
+      const { data } = await supabase
+        .from("ordenes_compra")
+        .select("*")
+        .eq("cliente_id", usuario.id)
+        .order("fecha", { ascending: false });
       if (activo) {
-        setPedidosCliente(filas);
+        setPedidosCliente(data ?? []);
         setCargandoPedidos(false);
       }
     };
@@ -256,8 +245,11 @@ export default function M_index() {
 
     const canal = supabase
       .channel(`modal-pedidos-${usuario.id}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "ventas" }, cargar)
-      .on("postgres_changes", { event: "*", schema: "public", table: "detalleVentas" }, cargar)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "ordenes_compra", filter: `cliente_id=eq.${usuario.id}` },
+        cargar
+      )
       .subscribe();
 
     return () => {
@@ -266,7 +258,7 @@ export default function M_index() {
     };
   }, [modalPedidosAbierto, usuario?.id]);
 
-  // Cada fila de detalleVentas es un material; se agrupan por compra.
+  // Cada fila de ordenes_compra es un material; se agrupan por compra.
   const pedidosAgrupados = Object.values(
     pedidosCliente.reduce((acc, fila) => {
       const clave = codigoDePedido(fila);
@@ -465,11 +457,31 @@ export default function M_index() {
 
     setEnviandoCompra(true);
     try {
-      // registrar_venta crea ventas + detalleVentas en UNA transacción; la base
-      // de datos valida el stock y registra la salida de inventario (movimientos)
-      // sola, con el precio real del inventario.
-      await registrarVenta(carrito.map((item) => ({ id: item.id, cantidad: item.cantidad })));
+      // Un solo código base por compra: así todos los productos del
+      // mismo pedido se agrupan juntos en "Mis Pedidos".
+      const codigoBase = `PED-${Date.now().toString().slice(-6)}`;
+      const nombreCliente = perfil?.nombre
+        ? `${perfil.nombre} ${perfil.apellido || ""}`.trim()
+        : usuario.email;
 
+      const filas = carrito.map((item, indice) => ({
+        codigo: `${codigoBase}-${indice + 1}`,
+        producto_id: item.id,
+        producto_nombre: item.nombre,
+        cantidad: item.cantidad,
+        cliente_id: usuario.id,
+        cliente_nombre: nombreCliente,
+        precio_unitario: item.precio,
+        origen: "cliente",
+        estado: "pendiente",
+      }));
+
+      const { error } = await supabase.from("ordenes_compra").insert(filas);
+      if (error) throw error;
+
+      // La salida de material (descuento de stock + fila en "movimientos")
+      // la registra la base de datos con un trigger sobre "ordenes_compra"
+      // (ver salida-automatica.sql).
       setCarrito([]);
       setCarritoAbierto(false);
       Swal.fire({
@@ -1032,7 +1044,7 @@ export default function M_index() {
         alCerrar={() => setModalPerfilAbierto(false)}
       />
 
-      {/* MODAL MIS PEDIDOS (datos reales de ventas + detalleVentas) */}
+      {/* MODAL MIS PEDIDOS (datos reales de ordenes_compra) */}
       <div className={`kr-modal modal--pedidos ${modalPedidosAbierto ? 'activo' : ''}`}>
         <div className="modal-pedidos__header">
           <div className="d-flex align-items-center gap-2">

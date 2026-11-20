@@ -4,8 +4,6 @@ import Swal from "sweetalert2";
 
 import logoImg from "../../assets/img/logo.png";
 import { useAuth } from "../../context/AuthContext";
-import { supabase } from "../../api/supabase";
-import { cargarPerfil } from "../../api/db";
 
 import "../../assets/css/M_index.css";
 
@@ -14,32 +12,21 @@ import "../../assets/css/M_index.css";
  * KRONOS — LOGIN
  * ==========================================================
  *
- * Inicio de sesión utilizando Supabase Auth.
+ * Inicio de sesión contra el backend FastAPI (JWT):
  *
- * IMPORTANTE — de dónde sale el rol:
+ *   1. POST /auth/login  -> access_token
+ *   2. GET  /auth/me     -> perfil + rol numérico
  *
- * El rol NO se lee de auth.users / app_metadata (ese campo no
- * se llena desde el dashboard de Supabase al crear un usuario
- * con "Add user", así que siempre queda vacío y el login
- * fallaba con "Este usuario no tiene un rol asignado").
- *
- * El rol se lee de la tabla:
- *
- * usuarios + roles
- * usuarios.rol_idRol -> roles.nombreRol ('Administrador' | 'Empleado' |
- *            'Cliente' | 'Proveedor')
- *
- * Es la MISMA tabla de la que leen AuthContext.jsx,
- * ProtectedRoute y todas las páginas del portal de proveedor
- * — por eso el login tiene que leer de ahí también: si cada
- * parte de la app lee el rol de un lugar distinto, terminan
- * desincronizadas.
+ * AuthContext hace ambos pasos en iniciarSesion() y devuelve
+ * el rol ya traducido a texto ('jefe' | 'administrador' |
+ * 'empleado' | 'cliente' | 'proveedor'), de modo que aquí solo
+ * hay que redirigir.
  *
  * Roles utilizados:
  *
- * administrador / empleado → /jefe/panel
- * cliente              → /cliente/pedidos
- * proveedor            → /proveedor
+ * jefe / administrador (SUPER_ADMIN) → /jefe/panel
+ * cliente                            → /cliente/
+ * proveedor                          → /proveedor
  *
  * ==========================================================
  */
@@ -109,7 +96,7 @@ export default function Login({ abierto = true, alCerrar }) {
     // JEFE / ADMINISTRADOR
     // ------------------------------------------------------
 
-    if (rol === "jefe" || rol === "SUPER_ADMIN" || rol === "empleado") {
+    if (rol === "jefe" || rol === "administrador") {
 
       navigate("/jefe/panel", {
         replace: true,
@@ -148,12 +135,26 @@ export default function Login({ abierto = true, alCerrar }) {
 
 
     // ------------------------------------------------------
+    // EMPLEADO
+    // ------------------------------------------------------
+
+    if (rol === "empleado") {
+
+      navigate("/", {
+        replace: true,
+      });
+
+      return;
+    }
+
+
+    // ------------------------------------------------------
     // SI NO EXISTE EL ROL
     // ------------------------------------------------------
 
     Swal.fire({
       title: "Rol no configurado",
-      text: "Tu usuario no tiene un rol válido asignado (tabla 'roles').",
+      text: "Tu usuario no tiene un rol válido asignado.",
       icon: "warning",
       confirmButtonColor: "#E8600C",
       confirmButtonText: "Entendido",
@@ -179,57 +180,21 @@ export default function Login({ abierto = true, alCerrar }) {
 
     setCargando(true);
 
-    // true mientras exista una sesión abierta cuyo rol aún no validamos.
-    let sesionSinValidar = false;
-
     try {
 
       // ----------------------------------------------------
-      // AUTENTICACIÓN CON SUPABASE
+      // AUTENTICACIÓN CON EL BACKEND (FastAPI + JWT)
+      // ----------------------------------------------------
+      //
+      // iniciarSesion hace POST /auth/login y luego GET /auth/me.
+      // Si algo falla lanza un error con un mensaje legible.
+      //
       // ----------------------------------------------------
 
-      const { user } = await iniciarSesion(
+      const { rol } = await iniciarSesion(
         correo,
         password
       );
-
-      sesionSinValidar = true;
-
-
-      // ----------------------------------------------------
-      // VALIDAMOS QUE EL USUARIO EXISTA
-      // ----------------------------------------------------
-
-      if (!user) {
-
-        throw new Error(
-          "No se pudo obtener la información del usuario."
-        );
-      }
-
-
-      // ----------------------------------------------------
-      // OBTENER EL ROL DESDE LAS TABLAS 'usuarios' + 'roles'
-      // ----------------------------------------------------
-      //
-      // AuthContext ya carga el perfil en segundo plano al
-      // iniciar sesión, pero lo volvemos a pedir aquí para
-      // poder redirigir de inmediato sin esperar un segundo
-      // render del contexto.
-      //
-      // ----------------------------------------------------
-
-      let perfil = null;
-      try {
-        // usuarios + roles (tabla `roles`: Administrador, Empleado, Cliente, Proveedor)
-        perfil = await cargarPerfil(user);
-      } catch (errorPerfil) {
-        throw new Error(
-          "No se pudo consultar el rol del usuario: " + errorPerfil.message
-        );
-      }
-
-      const rol = perfil?.rol;
 
 
       // ----------------------------------------------------
@@ -239,7 +204,7 @@ export default function Login({ abierto = true, alCerrar }) {
       if (!rol) {
 
         throw new Error(
-          "Esta cuenta aún no tiene un usuario con rol en el sistema (tabla 'usuarios'). Pide al administrador que la registre."
+          "Este usuario no tiene un rol válido asignado."
         );
       }
 
@@ -247,9 +212,6 @@ export default function Login({ abierto = true, alCerrar }) {
       // ----------------------------------------------------
       // MENSAJE DE BIENVENIDA
       // ----------------------------------------------------
-
-      // Rol validado: a partir de aquí la sesión debe quedar abierta.
-      sesionSinValidar = false;
 
       await Swal.fire({
 
@@ -294,12 +256,6 @@ export default function Login({ abierto = true, alCerrar }) {
 
 
     } catch (error) {
-
-      // Si ya se había autenticado pero no tiene perfil/rol válido, no dejamos
-      // una sesión abierta que ProtectedRoute no sabría a dónde enviar.
-      if (sesionSinValidar) {
-        await supabase.auth.signOut().catch(() => {});
-      }
 
       // ----------------------------------------------------
       // ERROR DE LOGIN

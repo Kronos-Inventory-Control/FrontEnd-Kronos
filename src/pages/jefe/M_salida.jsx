@@ -1,9 +1,10 @@
 import { useState } from "react";
 import Swal from "sweetalert2";
 import "../../assets/css/M_salidas.css";
-import { registrarMovimiento } from "../../api/db";
+import { supabase } from "../../api/supabase";
 import { useRealtimeTable } from "../../hooks/useRealtimeTable";
 import { useCategorias } from "../../hooks/useCategorias";
+import { useAuth } from "../../context/AuthContext";
 
 /**
  * Movimientos · Registrar salida de material — con afectación real de
@@ -19,6 +20,7 @@ const ESTADO_INICIAL = {
   cantidad: 0,
   modelo: "",
   categoria: "",
+  responsable: "",
 };
 
 function M_salida() {
@@ -27,6 +29,7 @@ function M_salida() {
   const { datos: productos } = useRealtimeTable("productos");
   // Mismas categorías (en tiempo real) que Stock y Entradas
   const { categorias } = useCategorias();
+  const { perfil, usuario } = useAuth();
 
   const actualizarCampo = (campo) => (evento) => {
     setForm((actual) => ({ ...actual, [campo]: evento.target.value }));
@@ -73,14 +76,21 @@ function M_salida() {
 
     setGuardando(true);
     try {
-      // La base de datos descuenta el stock sola (trigger) y rechaza la
-      // salida si superara lo disponible. El usuario queda en el movimiento.
-      await registrarMovimiento({
-        productoId: producto.id,
+      const { error: errorUpdate } = await supabase
+        .from("productos")
+        .update({ stock_actual: producto.stock_actual - cantidad })
+        .eq("id", producto.id);
+      if (errorUpdate) throw errorUpdate;
+
+      const responsable = form.responsable.trim() || perfil?.nombre || usuario?.email || "Jefe";
+      const { error: errorMovimiento } = await supabase.from("movimientos").insert({
+        producto_id: producto.id,
         tipo: "salida",
         cantidad,
-        precioUnitario: producto.precio,
+        motivo: `Salida de material${form.marca ? ` · Marca: ${form.marca}` : ""}${form.modelo ? ` · Modelo: ${form.modelo}` : ""}`,
+        responsable,
       });
+      if (errorMovimiento) throw errorMovimiento;
 
       Swal.fire({
         title: "¡Salida registrada!",
@@ -188,6 +198,18 @@ function M_salida() {
                   <option key={c.id} value={c.nombre}>{c.nombre}</option>
                 ))}
               </select>
+            </div>
+
+            <div className="col-12">
+              <label className="form-label" htmlFor="sal-responsable">Responsable del retiro</label>
+              <input
+                id="sal-responsable"
+                type="text"
+                className="form-control"
+                placeholder="Nombre de quien retira"
+                value={form.responsable}
+                onChange={actualizarCampo("responsable")}
+              />
             </div>
           </div>
 

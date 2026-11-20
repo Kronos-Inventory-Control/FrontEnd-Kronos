@@ -3,18 +3,16 @@ import { Modal } from "bootstrap";
 import Swal from "sweetalert2";
 import "../../assets/css/E_panel-jefe.css";
 import logo from "../../assets/img/logo.png";
-import { guardarUmbral as guardarUmbralDB } from "../../api/db";
-import { guardarReporteLocal } from "../../api/reportesLocales";
+import { supabase } from "../../api/supabase";
 import { useRealtimeTable } from "../../hooks/useRealtimeTable";
 
 /**
  * Panel de Control del jefe — ahora conectado a Supabase en tiempo real.
  *
- * Tablas usadas (ver KRONOS_ESQUEMA_V3.sql y src/api/db.js):
- *   inventarios (+categorias, marcas, unidadVentas) -> KPIs, Reporte de Críticos, Umbrales
- *   alertas      -> Alertas de Stock (las crea sola la base de datos al bajar del umbral)
+ * Tablas usadas (ver documentación de esquema en src/api/supabase.js):
+ *   productos    -> KPIs, Alertas de Stock, Reporte de Críticos, Umbrales
  *   movimientos  -> Historial de Movimientos
- *   el historial de reportes exportados se guarda en el navegador
+ *   reportes_generados -> se inserta un registro cada vez que se exporta
  *
  * Toda lectura + suscripción realtime vive en useRealtimeTable; aquí solo
  * se calculan derivados (KPIs, filtros) y se hacen los `insert`/`update`
@@ -32,7 +30,6 @@ function E_panel() {
     useRealtimeTable("productos", { orderBy: "nombre", ascending: true });
   const { datos: movimientos, cargando: cargandoMovimientos } =
     useRealtimeTable("movimientos", { orderBy: "fecha", ascending: false });
-  const { datos: alertas } = useRealtimeTable("alertas");
 
   const [formato, setFormato] = useState("excel");
   const [limite, setLimite] = useState("");
@@ -51,12 +48,10 @@ function E_panel() {
     [productos]
   );
 
-  // Alertas de Stock: salen de la tabla `alertas` (estado "pendiente"), que la
-  // base de datos mantiene sola cuando el stock baja del umbral mínimo.
-  const alertasStock = useMemo(() => {
-    const conAlertaPendiente = new Set(alertas.filter((a) => a.estado === "pendiente").map((a) => a.producto_id));
-    return productosConEstado.filter((p) => conAlertaPendiente.has(p.id) && p.clase !== "estable");
-  }, [productosConEstado, alertas]);
+  const alertasStock = useMemo(
+    () => productosConEstado.filter((p) => p.clase !== "estable"),
+    [productosConEstado]
+  );
 
   const totalProductos = productos.length;
   const productosBajoStock = productosConEstado.filter((p) => p.clase === "bajo-stock").length;
@@ -119,11 +114,12 @@ function E_panel() {
 
     setExportando(true);
     try {
-      guardarReporteLocal({
+      const { error } = await supabase.from("reportes_generados").insert({
         tipo: "Materiales Críticos",
         categoria: formato,
         cantidad: alertasStock.length,
       });
+      if (error) throw error;
 
       Swal.fire({
         title: "¡Reporte generado!",
@@ -155,7 +151,11 @@ function E_panel() {
 
     setGuardandoUmbral(true);
     try {
-      await guardarUmbralDB(productoAlertaId, limite);
+      const { error } = await supabase
+        .from("productos")
+        .update({ umbral_minimo: Number(limite) })
+        .eq("id", productoAlertaId);
+      if (error) throw error;
 
       Swal.fire({
         title: "¡Cambios guardados!",
@@ -311,10 +311,8 @@ function E_panel() {
                   <p className="mb-1 text-muted small fw-bold">CATEGORÍA</p>
                   <p className="fw-semibold fs-6">{productoSeleccionado?.categoria || "—"}</p>
 
-                  <p className="mb-1 text-muted small fw-bold">MARCA / MODELO</p>
-                  <p className="fw-semibold fs-6">
-                    {[productoSeleccionado?.marca, productoSeleccionado?.modelo].filter(Boolean).join(" · ") || "—"}
-                  </p>
+                  <p className="mb-1 text-muted small fw-bold">UBICACIÓN EN BODEGA</p>
+                  <p className="fw-semibold fs-6">{productoSeleccionado?.ubicacion || "—"}</p>
                 </div>
 
                 <div className="col-12 col-md-6">

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import Swal from "sweetalert2";
-import { actualizarPerfil } from "../api/db";
+import { supabase, TABLA_PERFILES } from "../api/supabase";
 import { useAuth } from "../context/AuthContext";
 
 const CAMPOS_INICIALES = {
@@ -21,8 +21,8 @@ const CAMPOS_INICIALES = {
  * así que no requiere agregar ni tocar reglas de CSS: no interfiere
  * con el modal del carrito ni con el de registro/login.
  *
- * Actualiza `usuarios` y `direcciones` en Supabase (el cliente solo
- * puede editar lo suyo por RLS), y refresca el AuthContext al guardar para que el
+ * Actualiza directamente la tabla `perfiles` en Supabase
+ * (auth.uid() = id), y refresca el AuthContext al guardar para que el
  * nombre se vea actualizado de inmediato en el navbar.
  */
 export default function ModalPerfilCliente({ abierto, alCerrar }) {
@@ -53,8 +53,12 @@ export default function ModalPerfilCliente({ abierto, alCerrar }) {
     evento.preventDefault();
     setGuardando(true);
     try {
-      // usuarios (nombre, apellidos, teléfono) + direcciones (barrio, localidad, dirección)
-      await actualizarPerfil(perfil, form);
+      const { error } = await supabase
+        .from(TABLA_PERFILES)
+        .update(form)
+        .eq("id", usuario.id);
+
+      if (error) throw error;
 
       await recargarPerfil();
 
